@@ -57,7 +57,9 @@ def main():
  sources[".astra-luna-sol/token_usage.py"]=ROOT/"scripts/token_usage.py"
  sources[".astra-luna-sol/usage.sh"]=ROOT/"scripts/usage.sh"
  desired={k:v.read_text() for k,v in sources.items()}
- ag=target/"AGENTS.md";orig=ag.read_text() if ag.is_file() else ""
+ ag=target/"AGENTS.md"
+ if ag.is_symlink():print("REFUSED: AGENTS.md is a symlink",file=sys.stderr);return 2
+ orig=ag.read_text() if ag.is_file() else ""
  if A in orig or B in orig:
   if orig.count(A)!=1 or orig.count(B)!=1 or orig.index(A)>orig.index(B):raise ValueError("Broken AGENTS.md markers")
   oldblock=orig[orig.index(A):orig.index(B)+len(B)]
@@ -89,19 +91,32 @@ def main():
    else:write(cfg,restored_config)
   if ag.exists() and oldblock:
    if old["created"] and orig==oldblock+"\n":ag.unlink()
-   else:write(ag,orig.replace("\n\n"+oldblock+"\n","",1).replace(oldblock+"\n","",1))
+   else:
+    pos=orig.index(oldblock)
+    before=orig[:pos]
+    after=orig[pos+len(oldblock):]
+    sep=old.get("agents_join","\n\n")
+    if sep and before.endswith(sep):before=before[:-len(sep)]
+    if after.startswith("\n"):after=after[1:]
+    write(ag,before+after)
   mf.unlink();print("UNINSTALL OK");return 0
  print("Installing "+str(len(desired))+" managed files to "+str(target))
  if a.dry_run:print("DRY RUN: no files changed");return 0
  for rel,s in desired.items():write(target/rel,s,0o755 if rel.endswith(("/run.sh","/usage.sh","/token_usage.py")) else 0o644)
  if not cfg.is_file() or cfg.read_text(encoding="utf-8")!=desired_config:write(cfg,desired_config)
  block=A+"\n"+(ROOT/"profiles/AGENTS.snippet.md").read_text().strip()+"\n"+B
- if oldblock:new=orig.replace(oldblock,block,1)
- elif orig:new=orig.rstrip("\n")+"\n\n"+block+"\n"
- else:new=block+"\n"
+ if oldblock:
+  new=orig.replace(oldblock,block,1)
+  join=old.get("agents_join","\n\n")
+ elif orig:
+  join="\n"
+  new=orig+join+block+"\n"
+ else:
+  join=""
+  new=block+"\n"
  created=old.get("created",False) if ag.exists() else True
  write(ag,new)
- write(mf,json.dumps({"files":{k:hashit(v) for k,v in desired.items()},"config":next_config_state,"agents":hashit(block),"created":created},indent=2))
+ write(mf,json.dumps({"files":{k:hashit(v) for k,v in desired.items()},"config":next_config_state,"agents":hashit(block),"created":created,"agents_join":join},indent=2))
  print("INSTALL OK: start Codex with \"codex\" after one-time ocx setup")
  print("Token usage: bash .astra-luna-sol/usage.sh --latest");return 0
 if __name__=="__main__":
