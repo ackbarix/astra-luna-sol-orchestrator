@@ -1,0 +1,13 @@
+# Installed only if this project had no .codex/config.toml.
+# Existing Codex project/global configs are never overwritten by this installer.
+# The launcher also passes these core model defaults explicitly.
+model = "gpt-6-astra"
+model_reasoning_effort = "medium"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 6
+default_subagent_model = "gpt-6-luna"
+default_subagent_reasoning_effort = "max"
