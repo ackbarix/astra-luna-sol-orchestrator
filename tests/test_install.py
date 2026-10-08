@@ -22,6 +22,11 @@ class InstallTest(unittest.TestCase):
    (p/".codex/config.toml").write_text("model = 'custom'\n")
    (p/"AGENTS.md").write_text("User instructions\n")
    self.assertEqual(self.run_install(p).returncode,0)
+   import tomllib
+   with (p/".codex/config.toml").open("rb") as f:cfg=tomllib.load(f)
+   self.assertEqual(cfg["model"],"gpt-6-astra")
+   self.assertEqual(cfg["agents"]["default_subagent_model"],"gpt-6-luna")
+   self.assertEqual(self.run_install(p,"--uninstall").returncode,0)
    self.assertEqual((p/".codex/config.toml").read_text(),"model = 'custom'\n")
    self.assertIn("User instructions",(p/"AGENTS.md").read_text())
  def test_refuse_overwrite_modified_role(self):

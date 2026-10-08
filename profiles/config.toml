@@ -1,6 +1,6 @@
-# Installed only if this project had no .codex/config.toml.
-# Existing Codex project/global configs are never overwritten by this installer.
-# The launcher also passes these core model defaults explicitly.
+# Astra Luna Sol project profile installed only when no project Codex config exists.
+# For existing projects, install.py safely merges these model defaults into
+# existing .codex/config.toml and can restore the original assignments.
 model = "gpt-6-astra"
 model_reasoning_effort = "medium"
 approval_policy = "on-request"
