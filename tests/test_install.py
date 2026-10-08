@@ -35,4 +35,21 @@ class InstallTest(unittest.TestCase):
    role=p/".codex/agents/als_worker.toml";role.write_text("user change\n")
    self.assertEqual(self.run_install(p).returncode,2)
    self.assertEqual(self.run_install(p,"--uninstall").returncode,2)
+ def test_agents_md_preserves_exact_user_text(self):
+  for existing in ("# instructions", "# instructions\n", "# instructions\n\n", ""):
+   with tempfile.TemporaryDirectory() as d:
+    p=pathlib.Path(d)
+    (p/"AGENTS.md").write_text(existing)
+    self.assertEqual(self.run_install(p).returncode,0)
+    self.assertEqual(self.run_install(p,"--uninstall").returncode,0)
+    self.assertEqual((p/"AGENTS.md").read_text(),existing)
+ def test_agents_md_unrelated_addition_survives(self):
+  with tempfile.TemporaryDirectory() as d:
+   p=pathlib.Path(d)
+   original="# instructions\n"
+   (p/"AGENTS.md").write_text(original)
+   self.assertEqual(self.run_install(p).returncode,0)
+   with (p/"AGENTS.md").open("a") as f:f.write("\n# new rule\n")
+   self.assertEqual(self.run_install(p,"--uninstall").returncode,0)
+   self.assertEqual((p/"AGENTS.md").read_text(),original+"\n# new rule\n")
 if __name__=="__main__":unittest.main()
