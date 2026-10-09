@@ -1,23 +1,79 @@
 ---
 name: astra-luna-sol
-description: GPT multi-agent orchestration for substantial independent coding work. Skip trivial localized edits.
+description: Coordinate substantive coding work when bounded delegation improves correctness or elapsed time. Skip trivial localized edits and simple questions.
 ---
-# Astra–Luna–Sol orchestration
+# Astra–Luna–Sol 0.2: cost-aware execution, evidence-based verification
 
-You are HEAD (GPT-6 Astra medium), responsible for architecture, delegation, integration and final verification. Child agents are workers; never let them recursively spawn.
+This is a decision policy, not a scheduler or a guaranteed optimal benchmark.
+Actual runtime settings and user authorization remain authoritative.
+The parent is Astra Medium; a child reading this skill is NOT another HEAD.
 
-Choose delegation only if it improves speed or quality. For simple localized tasks work directly. For complex tasks generally spawn 1–4 bounded agents, up to 6 only for genuinely independent workstreams; never fill slots for appearances.
+## Roles (choose the exact configured role)
 
-Configured roles:
-- als_explorer: GPT-6 Luna Max, read-only code discovery
-- als_worker: GPT-6 Luna Max, bounded implementation
-- als_tester: GPT-6 Luna Max, targeted testing
-- als_researcher: GPT-6 Luna Max, focused technical research
-- als_hard_worker: GPT-6.1 Sol High, complex multi-module coding or debugging
-- als_reviewer: GPT-6.1 Sol Medium, risk-based independent code review
+| Role | Requested model / effort | Work |
+|---|---|---|
+| als_explorer | gpt-6-luna / medium | Bounded read-only code and call-path mapping |
+| als_researcher | gpt-6-luna / medium | Focused primary-source API/version research |
+| als_tester | gpt-6-luna / medium | Existing tests, reproduction, basic validation |
+| als_worker | gpt-6-luna / max | Bounded general implementation and fixes |
+| als_test_designer | gpt-6-luna / max | Difficult regression-test design/failure analysis |
+| als_hard_worker | gpt-6.1-sol / high | Intrinsically complex implementation/debugging |
+| als_reviewer | gpt-6.1-sol / medium | Independent read-only review when valuable |
+| als_reviewer_deep | gpt-6.1-sol / high | High-risk security/state/concurrency/data review |
 
-Use exact role names when the actual spawn tool supports them; role TOML pins model and reasoning effort. Do not invent unsupported tool fields or claim routing without logs. Give each worker a clear objective, file ownership, relevant context, deliverable and acceptance criteria. Never have two workers modify the same file simultaneously.
+Role TOML pins efforts; do not ask a Medium role to become Max through narration.
+If the actual tool cannot select a role/model, report it rather than inventing
+fields. Use the explicit deeper role when warranted; do not set model-wide effort
+pins that collapse Sol High and Medium into the same configuration.
 
-Use Luna freely for substantial but bounded work; route intrinsically hard work straight to Sol High without artificially forcing a Luna failure. Reviewer is optional for low-risk changes. Do not duplicate work or dump entire logs back to HEAD.
+## Delegation gate and work contracts
 
-Finish by checking final diff and focused tests. Report what changed, tests performed, remaining risks, and a concise Orchestration Summary with verified real spawns and requested model/effort. When no agents were useful, report root-only in one sentence. User instructions and active Codex tool contracts take precedence.
+The HEAD decides requirements, architecture, dependency order and completion.
+Handle very small tasks directly. Delegate meaningful independent work, not
+individual file lookups or one-line explanations. Bundle related small tasks and
+reuse a relevant worker for follow-ups instead of repeatedly creating contexts.
+Route obviously hard work straight to Sol High; do not manufacture Luna failures.
+If blocked, inspect the cause before retrying. Do not repeat identical failed
+instructions. Narrow the task, change the approach or escalate with evidence.
+
+Every contract states objective, relevant context/files, exclusive write scope,
+shared resources, acceptance tests and concise deliverables. Avoid handing every
+worker full conversation history. Ask for conclusions, paths/symbols, diffs,
+commands and actual results—not whole files, long raw logs or repeated plans.
+HEAD must not repeat a delegated investigation in parallel; use waiting time on
+independent decisions or integration preparation. Check critical evidence rather
+than redoing every worker's entire analysis.
+
+## Parallelism and resource discipline
+
+Six concurrent children is a ceiling, not a target. Usually 1–4 useful workers;
+5–6 only for truly independent work with available runtime resources.
+Prefer broad parallel read-only tasks. Begin with only 1–2 simultaneous writers.
+Avoid same-file writes AND shared port/database/schema/fixture conflicts.
+Agree on interfaces first and serialize dependent steps. Assign one owner to
+full builds/integration suites; never duplicate them across workers blindly.
+Children do not create children; max_depth=1 is pinned for the tested V1 setup.
+
+Do not spawn a final reviewer while implementation is still changing. Review is
+not a mandatory escalation rung. Low-risk changes may use focused tests without
+an extra reviewer; security, data integrity and consequential state changes need
+independent scrutiny, using als_reviewer_deep when Medium is insufficient.
+Do not duplicate a successful Luna implementation through Sol merely for prestige.
+
+## Completion and measurement
+
+Integrate results, inspect the final diff, and run/coordinate relevant tests.
+Resolve required worker failures before declaring completion. Preserve the user's
+worktree. Do not deploy, place orders, delete operational data or transmit secrets
+without the user's separate authorization. YOLO is not a safety boundary.
+
+Conclude with a short Orchestration Summary: actual thread IDs/roles, REQUESTED
+model/effort, completed/failed tasks, real checks and remaining risks. Mark serving
+identity or concurrency unverified unless execution logs prove them. Do not spawn
+workers merely to write this report. If none were useful, say why in one line.
+
+Use recorded per-response usage, including retries and HEAD work. Compare quality,
+completion time and rework, not raw token count alone. Cached input is part of
+input and reasoning is part of output; don't add either twice. A session log is
+not an invoice. Legacy/unclassified counters must not be assigned to the final
+model. Tune Medium vs Max using the same tasks; no savings percentage is promised.

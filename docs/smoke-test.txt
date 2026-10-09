@@ -1,0 +1,22 @@
+This is a deliberate, one-time live orchestration smoke test. It consumes quota.
+Use a fresh Codex session with an explicitly read-only parent sandbox. Do not
+modify application code, change settings, install tools, or invoke network tools.
+
+Use the actual available spawn tool, not model impersonation. Spawn exactly:
+1. als_explorer (gpt-6-luna / medium): read .codex/agents/als_explorer.toml and
+   report the declared name, model and effort in one line.
+2. als_worker (gpt-6-luna / max): read .astra-luna-sol/VERSION and return its text.
+   This smoke task is READ-ONLY even though the normal worker can implement code.
+3. als_hard_worker (gpt-6.1-sol / high): read .codex/agents/als_hard_worker.toml
+   and report the declared name, model and effort in one line.
+4. als_reviewer (gpt-6.1-sol / medium): read .codex/agents/als_reviewer.toml and
+   confirm its declared sandbox mode in one line. Do not edit anything.
+
+All four tasks are independent: launch before waiting, within available capacity.
+Do not run additional agents or recursively delegate. If a role/effort/tool is
+unavailable, report the exact limitation instead of substituting silently.
+Wait for all four tasks, record their returned thread IDs and success/failure.
+Report requested role/model/effort separately from runtime evidence. Reading a
+model name from a TOML file is NOT proof that this model actually served a call.
+Do not claim parallel execution or serving identity from your own narration.
+The user will compare real session records and OpenCodex request logs afterward.

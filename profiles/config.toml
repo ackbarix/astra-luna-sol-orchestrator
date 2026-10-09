@@ -1,6 +1,4 @@
-# Astra Luna Sol project profile installed only when no project Codex config exists.
-# For existing projects, install.py safely merges these model defaults into
-# existing .codex/config.toml and can restore the original assignments.
+# ALS 0.2.0 defaults; existing configs use a reversible, validated overlay.
 model = "gpt-6-astra"
 model_reasoning_effort = "medium"
 approval_policy = "on-request"
@@ -9,5 +7,6 @@ sandbox_mode = "workspace-write"
 [agents]
 enabled = true
 max_concurrent_threads_per_session = 6
+max_depth = 1
 default_subagent_model = "gpt-6-luna"
 default_subagent_reasoning_effort = "max"

@@ -1,14 +1,17 @@
-## Astra–Luna–Sol coding orchestration
+## Astra–Luna–Sol orchestration (0.2)
 
-This repository uses the project-scoped `$astra-luna-sol` skill for substantive work that benefits from delegation. Apply the skill when appropriate; it does not require spawning agents for trivial fixes.
+For substantive work that benefits from delegation, use `$astra-luna-sol`.
+Astra Medium owns requirements, architecture and integration. Use exact named
+roles: Luna Medium for exploration/research/basic test execution; Luna Max for
+implementation and difficult test design; Sol 6.1 High for hard implementation;
+Sol 6.1 Medium for independent review, or the explicit High reviewer for high-risk
+changes. These are requested settings, not claims of serving identity.
 
-- Root HEAD: `gpt-6-astra` at `medium` — planning, architecture, prioritization and final integration.
-- General worker/explorer/tester/researcher: `gpt-6-luna` at `max` — bounded work and cost-effective parallelism.
-- Hard worker: `gpt-6.1-sol` at `high` — complex feature implementation and difficult debugging.
-- Independent reviewer: `gpt-6.1-sol` at `medium` — risk-based review, not automatic review for every change.
-- Up to six concurrent subagents, but only when tasks are independent and useful.
-- Keep a single writer for each file; preserve existing user changes.
-- Do not fabricate delegation, model routing, tool results or test successes.
-- Treat the active Codex tool schema and user instructions as authoritative when they conflict with an illustrative example.
+Six workers is a concurrency ceiling, never a target. Begin with 1–4 useful
+independent tasks; normally only 1–2 simultaneous writers. Assign exclusive file
+and shared-resource ownership. Avoid repeated exploration, duplicate tests,
+waiting reviewers and full-context handoffs. Do trivial work directly. No child
+spawns children. Preserve user edits and permission boundaries.
 
-If a worker is spawned, disclose requested model/effort and the verifiable result concisely. Distinguish a requested model from the actual upstream model when that cannot be observed.
+Report actual spawns and checks briefly; never invent model routing, usage or
+passing tests. User instructions and the active tool schema take precedence.

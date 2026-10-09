@@ -1,59 +1,65 @@
-# Astra–Luna–Sol Orchestrator
+# Astra–Luna–Sol Orchestrator · 0.2.0
 
-**프로젝트에서 `codex`만 실행해 사용하는 개인용 GPT 멀티에이전트 오케스트레이션**
+프로젝트에서 **`codex`만 실행**하는 개인용 GPT 오케스트레이션입니다.
+참고: [donvito/codex-astra-luna-orchestrator](https://github.com/donvito/codex-astra-luna-orchestrator).
+OpenAI/OpenCodex의 공식 배포물이 아닙니다. 토큰 절감률이나 최고 성능은 보장하지 않습니다.
 
-참고 프로젝트: [donvito/codex-astra-luna-orchestrator](https://github.com/donvito/codex-astra-luna-orchestrator).
-독립 제작한 프로젝트이며 OpenAI 또는 OpenCodex의 공식 배포물이 아닙니다.
+## 이번 변경
 
-## 역할과 원칙
+기존 버전의 `[[skills.config]]` 병합 오류를 수정했습니다. 관리 대상 외의 TOML
+설정값이 하나라도 바뀌면 설치를 중단합니다. 기존 설치 기록을 읽어 업그레이드하고,
+제거 시 기존 모델 설정과 사용자 지침을 복원합니다. 모델 조합을 뒤집기보다는
+업무별 추론 수준과 중복 작업 방지 정책을 조정했습니다.
 
-| 역할 | 모델 / 노력 | 담당 |
-| --- | --- | --- |
-| HEAD | GPT-6 Astra / medium | 판단, 계획, 통합 및 최종 검증 |
-| 병렬 실무 | GPT-6 Luna / max | 탐색, 작은·중간 구현, 테스트, 자료 조사 |
-| 고난도 구현 | GPT-6.1 Sol / high | 복잡한 개발과 디버깅 |
-| 독립 리뷰 | GPT-6.1 Sol / medium | 고위험 변경의 독립 검증 |
+| 담당 | 모델 | 추론 수준 | 역할 이름 |
+|---|---|---|---|
+| 총괄 | GPT-6 Astra | Medium | HEAD |
+| 탐색·자료 조사 | GPT-6 Luna | Medium | als_explorer / als_researcher |
+| 기본 테스트 실행 | GPT-6 Luna | Medium | als_tester |
+| 일반 구현 | GPT-6 Luna | Max | als_worker |
+| 복잡한 테스트 설계 | GPT-6 Luna | Max | als_test_designer |
+| 고난도 구현 | GPT-6.1 Sol | High | als_hard_worker |
+| 독립 검수 | GPT-6.1 Sol | Medium | als_reviewer |
+| 고위험 독립 검수 | GPT-6.1 Sol | High | als_reviewer_deep |
 
-**최대 6개**는 동시 워커 한도이지 호출 목표가 아닙니다. 단순 작업에는 워커를 불필요하게 호출하지 않습니다.
-별도 역할 파일(`.codex/agents/als_*.toml`)과 스킬(`$astra-luna-sol`)이 역할을 설정합니다.
+동시 **6개는 상한**입니다. 보통 1–4개의 유용한 독립 작업부터 시작하고, 동시 작성자는
+1–2명부터 운영합니다. 같은 파일뿐 아니라 DB·포트·공통 테스트 데이터의 충돌도 피합니다.
+별도 검수가 필요하지 않으면 검수 워커를 자동으로 만들지 않습니다.
+Medium으로 낮춘 역할의 품질은 동일 작업 비교로 확인해야 합니다. 나빠진 경우에는
+역할과 설정을 함께 조정해야 하며, 프롬프트만으로 고정된 역할의 effort를 바꾸지 마세요.
 
-## 요구 사항
+## 설치·업데이트
 
-Linux/macOS, Bash, Git, **Python 3.11+**, Codex CLI, 설정된 [OpenCodex](https://github.com/lidge-jun/opencodex)(`ocx`).
-Codex가 해당 프로젝트를 신뢰해야 프로젝트 내 설정이 적용됩니다. 설치 스크립트는 Codex, OpenCodex 또는 인증 정보를 대신 설치하지 않습니다.
-
-## 설치 및 업데이트
+필요: Linux/macOS, Git, Bash, **Python 3.11+**, Codex CLI, 이미 인증·설정된 OpenCodex.
+이 설치기는 모델을 호출하거나 전역 설정·인증을 자동으로 바꾸지 않습니다.
 
 ```bash
+# 처음 받을 때만
 git clone https://github.com/ackbarix/astra-luna-sol-orchestrator.git
 cd astra-luna-sol-orchestrator
 
-# 기존 설정에 어떤 파일을 추가/변경할지 먼저 확인
+# 기존 사용자는 설치기 저장소에서 실행
+git pull --ff-only
+python3 --version
 sh install.sh /data/reactive-shortterm --dry-run
-
-# 실제 설치, 설치 무결성 확인
 sh install.sh /data/reactive-shortterm
 sh install.sh /data/reactive-shortterm --check
 ```
 
-이미 clone해서 사용 중이라면:
+대상 경로는 실제 개발 프로젝트로 바꾸세요. `--dry-run`은 쓰지 않습니다.
+설치 후 해당 프로젝트가 Codex에서 신뢰된 상태인지 확인하고 **새 세션**을 실행합니다.
 
 ```bash
-cd /data/astra-luna-sol-orchestrator
-git pull --ff-only
-sh install.sh /data/reactive-shortterm --dry-run
-sh install.sh /data/reactive-shortterm
+cd /data/reactive-shortterm
+codex
 ```
 
-설치기는 **기존 `.codex/config.toml`을 안전하게 병합**합니다. 모델과 워커 기본값만 관리 구간에 삽입하고 원래 모델 관련 설정을 복원용 주석으로 저장합니다. 나머지 설정, 승인 정책, 샌드박스 설정은 그대로 유지합니다. 다시 설치하거나 제거하면 관리 구간만 갱신·복원하고, 기존 `AGENTS.md`의 사용자 지침도 보존합니다.
+Codex의 `/status`에서 Astra Medium을 확인합니다. 큰 작업에서 스킬이 선택되지 않으면
+`$astra-luna-sol`을 명시하세요. 기존의 긴 지시문을 여러 개 추가로 붙이지 마세요.
+모드와 카탈로그를 변경했으면 실행 중인 기존 세션이 아니라 새 세션에서 확인해야 합니다.
 
-다만 여러 줄 문자열, 인라인·중첩 `[agents]` 등 안전하게 합치기 어려운 TOML은 **실패하도록 설계**했습니다. 그런 경우 원본 파일을 변경하지 않으므로, 충돌 내용을 확인하고 수동 병합하거나 명시적인 런처를 사용하세요.
-
-기존 버전에서 이미 관리 중이던 `.codex/config.toml`은 자동으로 설치 기록 형식을 변환하며, 제거하면 설치기가 만든 파일만 삭제합니다. 설치된 파일을 직접 수정했다면 덮어쓰거나 삭제하지 않고 충돌을 알려줍니다.
-
-## 실행: 원본 프로젝트처럼 `codex`만 사용
-
-OpenCodex는 1회 설정이 필요합니다. 이미 v1과 해당 모델들이 설정됐다면 건너뛰세요.
+OpenCodex v1이 아직 설정되지 않았다면 아래 명령은 **전역 설정을 변경**합니다.
+이미 해당 구성을 사용하는 경우 반복할 필요 없습니다.
 
 ```bash
 ocx v2 mode v1
@@ -62,63 +68,88 @@ ocx agent subagents set gpt-6-luna,gpt-6.1-sol,gpt-6-astra
 ocx effort set --subagent max
 ```
 
-이후에는 해당 프로젝트에서 **그냥 Codex**를 실행합니다.
+`--subagent max`는 상한이며 모든 워커를 Max로 만들지는 않습니다. 제공자/모델 고정
+추론 설정이 따로 있으면 역할의 요청값과 다를 수 있으므로 진단과 로그로 확인하세요.
+전용 런처도 선택적으로 유지합니다: `bash .astra-luna-sol/run.sh`.
+`--yolo`는 승인과 샌드박스를 모두 생략합니다. 별도 격리가 없는 환경에서 권장하지 않으며,
+자식 역할에 `read-only`라고 적힌 것만으로 OS 수준 차단을 보장하지 않습니다.
+
+## 설치 안전성·제한
+
+기존 TOML의 모델·에이전트 기본값만 복원 가능한 블록으로 관리합니다. 일반 테이블과
+배열 테이블을 구분하고, 관리 대상 외 모든 파싱 값의 보존 및 정확한 복원을 검사합니다.
+다중 행 문자열, 지원하지 않는 인라인/dotted 관리 키 등은 수정 대신 거부합니다.
+충돌 메시지가 나오면 파일을 지우거나 `--force`로 덮어쓰지 말고 원인을 먼저 확인하세요.
+
+편집된 관리 파일, 경로 이탈, 심볼릭 링크, 쓰기 전 발견한 동시 변경은 거부합니다.
+일반적인 쓰기 예외에는 본 작업의 쓰기를 롤백하지만, 전원 손실에 대한 다중 파일
+원자성까지 보장하지는 않습니다. 기존 config 권한과 AGENTS.md 사용자 내용을 보존합니다.
+애플리케이션 코드, 전역 Codex/OpenCodex 설정, 운영 서비스는 설치기에서 건드리지 않습니다.
+
+## 토큰 사용량: 세션 전체와 하루를 분리
 
 ```bash
 cd /data/reactive-shortterm
-codex
-```
-
-`/status`에서 **GPT-6 Astra / medium**인지 확인하세요. 큰 작업에서 스킬이 자동 선택되지 않으면 Codex에 `$astra-luna-sol`을 입력하세요.
-전용 런처는 여전히 선택적으로 사용할 수 있습니다.
-
-```bash
-bash .astra-luna-sol/run.sh
-bash .astra-luna-sol/run.sh --dry-run
-```
-
-**주의:** `--yolo`는 승인 질문뿐 아니라 Codex 샌드박스도 끄므로, 사용자가 별도로 격리한 신뢰할 수 있는 개발 환경에서만 사용하세요.
-
-## 토큰 사용량 분석 — 원본 프로젝트에서 가져온 기능
-
-원본 저장소의 `scripts/token_usage.py`를 Apache-2.0 조건에 따라 수정·포함했습니다. **세션 기록을 읽기만 하며 변경하지 않습니다.**
-
-개발 프로젝트 안에서 바로 사용합니다.
-
-```bash
-cd /data/reactive-shortterm
-
-# 이 프로젝트의 Codex 세션 목록
 bash .astra-luna-sol/usage.sh --list
-
-# 이 프로젝트에서 마지막으로 워커를 호출한 세션
 bash .astra-luna-sol/usage.sh --latest
-
-# 날짜를 제한해서 빠르게 확인
-bash .astra-luna-sol/usage.sh --latest --date 2026-10-08
-
-# 세션 ID 앞부분으로 지정
-bash .astra-luna-sol/usage.sh --root 01a09b
-
-# 자동화용 JSON
-bash .astra-luna-sol/usage.sh --latest --format json
+# 정확한 비교에는 목록에서 확인한 세션 ID 사용
+bash .astra-luna-sol/usage.sh --root 실제세션ID --format json > /tmp/als-session.json
+# 응답 시각 기준 한국 날짜 하루 사용량
+bash .astra-luna-sol/usage.sh --day 2026-10-08 --timezone Asia/Seoul
 ```
 
-리포트에는 **스레드/역할/모델/요청된 추론 수준/응답 수/캐시되지 않은 입력/캐시 입력/출력/추론 토큰/총토큰**과 모델별 합계가 표시됩니다. 추론 토큰은 보통 출력 토큰에 포함되므로 다시 더하지 마세요.
+**0.2의 달라진 옵션 의미:**
 
-**중요:** 이는 `~/.codex/sessions`에 저장된 값이며 실제 과금액·계정별 사용 한도 차감량·OpenCodex 제공자 측 최종 라우팅을 보증하지 않습니다. 오래된 기록에는 응답별 토큰 로그가 없어 마지막 누적값을 추정에 사용할 수 있습니다. `--latest`는 워커가 생성된 가장 최근 세션을 찾으므로 워커가 없는 세션은 `--list`와 `--root`로 확인하세요.
+- `--root`: 자정을 넘겨 생성된 자식까지 포함한 전체 세션.
+- `--latest`: 워커 없는 세션도 포함하여 가장 최근 시작한 세션.
+- `--latest-with-workers`: 이전처럼 워커가 있는 최근 시작 세션만 선택.
+- `--date`: 파일 폴더 필터가 아니라 HEAD 시작 날짜 필터. 선택된 세션 전체는 유지.
+- `--day`: 실제 응답 타임스탬프를 기준으로 하루만 집계. `--date`와 함께 쓰지 않음.
+- `--timezone`: 날짜 경계, 기본 UTC. 한국 날짜는 Asia/Seoul.
+- `--include-events`: JSON에 응답별 사용량도 포함. 원문 프롬프트/코드는 내보내지 않음.
+- `--strict`: 누락·미분류·손상 등 경고가 있으면 종료 코드 3. 일반 읽기/인자 오류는 2.
 
-원본 사용법: [Token Usage 가이드](https://github.com/donvito/codex-astra-luna-orchestrator/blob/main/guides/token-usage.md).
+기본 경로는 `$CODEX_HOME/sessions` 또는 `~/.codex/sessions`입니다. `--sessions-dir`로
+다른 위치를 지정할 수 있습니다. 자식 스레드를 날짜 폴더로 잘라내지 않기 때문에
+기록이 많으면 스캔 시간이 걸립니다. archived_sessions는 자동 합산하지 않습니다.
 
-## 실제 라우팅 확인
+리포트는 **응답 시점의 모델 × 추론 수준 × 스레드**로 집계합니다. 같은 Sol 스레드에서
+High→Medium으로 바뀌어도 분리됩니다. 중복 응답 ID는 다시 더하지 않으며, 응답 기록과
+누적 카운터도 이중 합산하지 않습니다.
+
+구형 누적 카운터에는 상속·재개된 과거 사용량이 섞일 수 있습니다. 따라서 마지막 모델에
+몰아주거나 확정 합계에 더하지 않고 **미분류 스냅샷**으로 별도 표시합니다. 일부만 기록된
+경우 확정 응답 합계는 전체 사용량의 하한일 수 있습니다. `complete`/`warnings`를 읽으세요.
+캐시는 입력의 일부, 추론은 출력의 일부입니다. 각각 다시 더하면 안 됩니다.
+
+이 자료는 **청구서·실제 제공자 라우팅·순수 작업 시간·병렬 실행의 증명은 아닙니다.**
+같은 코드/요구사항에서 품질·완료 시간·실패와 재시도까지 비교하는 방법은
+[검증·비교 가이드](docs/validation.md)를 참고하세요.
+
+## 실행 점검: 비용 없는 확인과 유료 실험을 구분
 
 ```bash
-ocx v2 status
-ocx agent status
+# 설치된 설정/역할만 읽음
+python3 .astra-luna-sol/check-runtime.py
+# 버전과 OpenCodex 상태를 추가로 읽음. 모델 호출 없음.
+python3 .astra-luna-sol/check-runtime.py --probe
+# 실제 검증 지시문을 출력할 뿐, 실행하지 않음
+python3 .astra-luna-sol/check-runtime.py --smoke-prompt
+```
+
+실제 워커 검증은 위 지시문을 **새로운 읽기 전용 Codex 세션**에서 사용자가 실행합니다.
+4개 워커의 실제 호출은 사용량이 발생하므로 업데이트/진단 때 자동 실행하지 않습니다.
+그 세션의 JSON 리포트를 만든 후 기록된 요청 모델·effort를 확인할 수 있습니다.
+
+```bash
+python3 .astra-luna-sol/check-runtime.py --report /tmp/als-session.json
 ocx logs --follow
 ```
 
-Codex 내 `/status`는 HEAD 설정을 확인합니다. 실제 서브에이전트 실행 여부와 요청 모델은 스레드와 OpenCodex 로그에서 따로 확인해야 합니다.
+검사 성공은 설정과 **기록된 응답 식별값**이 일치한다는 뜻입니다. 실제 제공자 모델은
+OpenCodex 요청 로그에서도 별도로 확인해야 합니다. 테스트 환경의 모델 품질 점수로
+해석하지 마세요. 이 릴리스의 자동 테스트는 합성 로그와 설치 동작을 검사하며, 사용자
+계정의 모델을 실행하지 않습니다.
 
 ## 제거
 
@@ -128,8 +159,12 @@ sh install.sh /data/reactive-shortterm --uninstall --dry-run
 sh install.sh /data/reactive-shortterm --uninstall
 ```
 
-기존 설정의 사용자 소유 값은 복원합니다. **전역 OpenCodex 설정은 자동으로 되돌리지 않습니다.**
+원래 있던 config 설정은 복원하고 설치기가 새로 만든 파일만 제거합니다.
+전역 OpenCodex 변경은 되돌리지 않습니다. 역할 파일을 수정한 경우 먼저 충돌을 해결하세요.
 
-## 라이선스
+## 검증·라이선스
 
-프로젝트 본체는 MIT입니다. 원본 기반 `scripts/token_usage.py`는 별도의 Apache-2.0 라이선스(`licenses/Apache-2.0.txt`)를 따릅니다.
+`python3 -m unittest discover -s tests -v`와 각 셸 파일의 문법 검사를 CI에서 수행합니다.
+[변경 기록](CHANGELOG.md)을 참고하세요. 프로젝트 본체는 MIT, 원본에서 파생한
+`scripts/token_usage.py`는 [Apache-2.0](licenses/Apache-2.0.txt)입니다. 설치된 리포터와
+함께 해당 라이선스도 복사합니다.

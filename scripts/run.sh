@@ -15,19 +15,20 @@ while (($#)); do
  esac
  shift
 done
-cmd=(codex -m gpt-6-astra -c 'model_reasoning_effort="medium"' -c 'agents.enabled=true' -c 'agents.max_concurrent_threads_per_session=6' -c 'agents.default_subagent_model="gpt-6-luna"' -c 'agents.default_subagent_reasoning_effort="max"')
+cmd=(codex -m gpt-6-astra -c 'model_reasoning_effort="medium"' -c 'agents.enabled=true' -c 'agents.max_concurrent_threads_per_session=6' -c 'agents.max_depth=1' -c 'agents.default_subagent_model="gpt-6-luna"' -c 'agents.default_subagent_reasoning_effort="max"')
 if "$yolo"; then cmd+=(--yolo); fi
 cmd+=("${extra[@]}")
 if "$dry"; then
- if "$configure"; then echo 'Would configure OpenCodex globally: v1, 6 threads, Luna/Sol/Astra, max cap'; fi
+ if "$configure"; then echo 'Would change GLOBAL OpenCodex: v1, 6 threads, GPT roster, child effort cap max'; fi
  printf 'Would execute: '; printf '%q ' "${cmd[@]}"; echo; exit 0
 fi
 if "$configure"; then
+ echo 'Changing global OpenCodex settings (explicit --configure-ocx). These affect other projects too.'
  ocx v2 mode v1
  ocx v2 threads 6
  ocx agent subagents set gpt-6-luna,gpt-6.1-sol,gpt-6-astra
  ocx effort set --subagent max
 fi
-if ! command -v codex >/dev/null; then echo 'Codex CLI missing' >&2; exit 1; fi
+command -v codex >/dev/null || { echo 'Codex CLI missing' >&2; exit 1; }
 cd "$project"
 exec "${cmd[@]}"
