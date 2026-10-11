@@ -54,6 +54,32 @@ jobs:
           sandbox=$(mktemp -d)
           HOME="$sandbox/home" CODEX_HOME="$sandbox/home/.codex" XDG_DATA_HOME="$sandbox/home/.local/share" \
             python3 -m unittest discover -s tests -v
+      - name: setup.sh on 3.9 (ALS_PYTHON=python, no tomllib), then als doctor --json with a fake codex
+        run: |
+          sandbox=$(mktemp -d)
+          mkdir -p "$sandbox/home" "$sandbox/fakebin"
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in --version) echo codex-cli 0.0.0-fake ;;' \
+            ' features) printf "hooks stable true\nmulti_agent stable true\n" ;;' \
+            ' *) echo "fake codex $*" ;; esac' > "$sandbox/fakebin/codex"
+          chmod +x "$sandbox/fakebin/codex"
+          export HOME="$sandbox/home" CODEX_HOME="$sandbox/home/.codex" \
+            XDG_DATA_HOME="$sandbox/home/.local/share" XDG_STATE_HOME="$sandbox/home/.local/state" \
+            ALS_BIN_DIR="$sandbox/home/.local/bin" ALS_PYTHON=python PATH="$sandbox/fakebin:$PATH"
+          python --version
+          python -c 'import sys; assert sys.version_info[:2] == (3, 9), sys.version'
+          sh setup.sh
+          project="$sandbox/project"
+          mkdir "$project" && git init -q "$project"
+          cd "$project"
+          "$ALS_BIN_DIR/als" install --hooks-only
+          # Exit status reflects required checks; the JSON must parse either way.
+          rc=0; "$ALS_BIN_DIR/als" doctor --no-probe --json > "$sandbox/doctor.json" || rc=$?
+          echo "als doctor exit status: $rc"
+          python -c 'import json, sys; d = json.load(open(sys.argv[1])); assert set(d) == {"deps", "harness"}, d' \
+            "$sandbox/doctor.json"
+          "$ALS_BIN_DIR/als" uninstall --hooks-only
+          "$ALS_BIN_DIR/als" uninstall --global
 
   end-to-end:
     runs-on: ${{ matrix.os }}
