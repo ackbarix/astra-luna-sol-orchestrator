@@ -23,10 +23,15 @@ def warn(message):
     return {'systemMessage': message[:1000]}
 
 
+DENY_FALLBACK = 'ALS guarded mode denied this spawn; inspect harness.py status for the reason.'
+
+
 def deny(message):
+    # Codex rejects a deny decision without a non-empty reason, failing open.
+    reason = message.strip() if isinstance(message, str) else ''
     return {'hookSpecificOutput': {'hookEventName': 'PreToolUse',
                                    'permissionDecision': 'deny',
-                                   'permissionDecisionReason': message[:1000]}}
+                                   'permissionDecisionReason': (reason or DENY_FALLBACK)[:1000]}}
 
 
 def response_thread(value):
@@ -47,6 +52,49 @@ def response_thread(value):
     return None
 
 
+def child_agent(payload):
+    """Codex adds agent_id/agent_type to tool hooks only when a subagent made the call."""
+    value = payload.get('agent_id')
+    return ident(value) if value is not None else None
+
+
+def linked_run(store, sid, agent):
+    """Run for a session, or for the parent session recorded on a known child worker."""
+    run = store.for_session(sid)
+    if run or not agent:
+        return run
+    worker = store.get('workers', agent) or {}
+    parent = worker.get('session')
+    return store.for_session(parent) if isinstance(parent, str) and parent != sid else None
+
+
+def record_receipt(store, sid, event, payload):
+    """Session receipt; skips the write transaction when nothing would change."""
+    receipt = store.get('sessions', sid)
+    if receipt is not None and event in receipt.get('seen', []) and event != 'SessionStart':
+        return receipt
+    with store.tx():
+        receipt = store.get('sessions', sid) or {'seen': [], 'transcripts': []}
+        receipt['seen'] = sorted(set(receipt['seen']) | {event})
+        receipt['last_event'] = now()
+        if event == 'SessionStart':
+            receipt['session_start_at'] = receipt['last_event']
+            if isinstance(payload.get('source'), str):
+                receipt['source'] = payload['source'][:40]
+            if isinstance(payload.get('transcript_path'), str):
+                receipt['transcripts'] = sorted(set(receipt['transcripts']) | {payload['transcript_path']})[-8:]
+        store.session(sid, receipt)
+    return receipt
+
+
+def update_worker(store, wid, sid, **fields):
+    with store.tx():
+        w = store.get('workers', wid) or {}
+        w.setdefault('session', sid)
+        w.update(fields)
+        store.worker(wid, sid, w)
+
+
 def handle(store, payload):
     if not isinstance(payload, dict):
         raise HarnessError('Hook payload must be an object')
@@ -55,9 +103,15 @@ def handle(store, payload):
     if event not in EVENTS:
         return warn('ALS: unsupported hook event; no enforcement claimed')
     ident(sid)
+    agent = child_agent(payload)
     cwd = Path(payload.get('cwd') or '').resolve()
     if cwd != store.project and store.project not in cwd.parents:
-        return warn('ALS: hook cwd outside the installed project; ignored')
+        # Forked-worktree children run outside the project; keep their lifecycle
+        # and spawn events only when the parent session maps to a run here.
+        child_event = event in {'SubagentStart', 'SubagentStop'} or (
+            event in {'PreToolUse', 'PostToolUse'} and agent is not None)
+        if not child_event or not linked_run(store, sid, agent):
+            return warn('ALS: hook cwd outside the installed project; ignored')
     if event in {'PreToolUse', 'PostToolUse'} and (
         not isinstance(payload.get('tool_use_id'), str) or not isinstance(payload.get('tool_input'), dict)
     ):
@@ -68,15 +122,9 @@ def handle(store, payload):
         return warn('ALS: unknown Stop schema; no automatic continuation')
     # Store receipts, not prompts, tool commands or raw results. Repeat SessionStart
     # is harmless. A session receipt is NOT proof of a tool actually being blocked.
-    with store.tx():
-        receipt = store.get('sessions', sid) or {'seen': [], 'transcripts': []}
-        receipt['seen'] = sorted(set(receipt['seen']) | {event})
-        receipt['last_event'] = now()
-        if event == 'SessionStart' and isinstance(payload.get('transcript_path'), str):
-            receipt['transcripts'] = sorted(set(receipt['transcripts']) | {payload['transcript_path']})[-8:]
-        store.session(sid, receipt)
+    record_receipt(store, sid, event, payload)
     engine = Engine(store)
-    run = store.for_session(sid)
+    run = linked_run(store, sid, agent)
     if not run:
         if event == 'SessionStart':
             pending = [r['id'] for r in store.runs() if r['status'] not in {'completed', 'cancelled'}][:4]
@@ -100,19 +148,28 @@ def handle(store, payload):
         wid = ident(payload.get('agent_id'))
         with store.tx():
             w = store.get('workers', wid) or {}
-            w.update(started=w.get('started') or now(), role=payload.get('agent_type'))
+            w.setdefault('session', sid)
+            w.update(started=w.get('started') or now(), role=payload.get('agent_type'), cwd=str(cwd))
             store.worker(wid, sid, w)
         return context(event, 'ALS child: perform only the assigned task. Do not spawn more agents.'
                        + ' Worker stopping is not completion proof.')
     if event == 'SubagentStop':
         wid = ident(payload.get('agent_id'))
         engine.worker_stopped(sid, wid, payload.get('agent_type'))
+        fields = {'cwd': str(cwd)}
         if isinstance(payload.get('agent_transcript_path'), str):
-            with store.tx():
-                w = store.get('workers', wid) or {}
-                w['transcript'] = payload['agent_transcript_path']
-                store.worker(wid, sid, w)
+            fields['transcript'] = payload['agent_transcript_path']
+        update_worker(store, wid, sid, **fields)
         return {}
+    if event == 'PreToolUse' and spawn_name(tool) and agent:
+        # Child-origin spawn: never reserve a plan task for it; record the parent.
+        call_id = ident(payload.get('tool_use_id'))
+        with store.tx():
+            store.event('child-spawn:' + rid + ':' + call_id, rid, 'child_spawn_attempt',
+                        {'parent_agent_id': agent, 'parent_agent_type': payload.get('agent_type'),
+                         'tool_use_id': call_id, 'cwd': str(cwd)})
+        msg = 'ALS: child agents may not spawn; finish the assigned task and report to the parent.'
+        return deny(msg) if mode == 'guarded' else warn('ALS observe: ' + msg)
     if event == 'PreToolUse' and spawn_name(tool):
         inp = payload.get('tool_input')
         if not isinstance(inp, dict):
@@ -150,14 +207,19 @@ def handle(store, payload):
                 return context('PreToolUse', 'ALS soft budget ' + b['stage']
                                + '. Confirmed tokens are a lower bound; avoid unnecessary new work.')
         return {}  # never implicitly grant any tool permission
+    if event == 'PostToolUse' and spawn_name(tool) and agent:
+        return {}  # denied or warned at PreToolUse; nothing was reserved
     if event == 'PostToolUse' and spawn_name(tool):
         call_id = payload.get('tool_use_id')
         thread = response_thread(payload.get('tool_response'))
         if thread:
             try:
-                engine.bind(rid, call_id, thread)
+                bound = engine.bind(rid, call_id, thread) or {'bound': True, 'reason': None}
             except HarnessError as ex:
                 return warn(str(ex))
+            if not bound.get('bound'):
+                return warn('ALS spawn result not bound: ' + str(bound.get('reason') or 'unknown reason')
+                            + '. Inspect task status; the child may be running untracked.')
         else:
             # A network failure may conceal successful dispatch. Keep reservations
             # until a caller confirms the old worker stopped; never retry blindly.
