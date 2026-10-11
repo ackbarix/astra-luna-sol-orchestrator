@@ -199,6 +199,46 @@ class SessionResumeTests(unittest.TestCase):
         self.assertNotIn('resume --run', text)
         self.assertIn(r, text)
 
+class ScopeHintTests(unittest.TestCase):
+    """SessionStart guidance must name the command that works in this scope."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self.tmp.name) / 'project'
+        self.project.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.project)], check=True)
+        self.env = patch.dict('os.environ', {'ALS_STATE_HOME': str(Path(self.tmp.name) / 'state')})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def start_text(self, scope):
+        store = Store(self.project, scope=scope)
+        try:
+            out = hooks.handle(store, {'hook_event_name': 'SessionStart', 'session_id': 'sid',
+                                       'cwd': str(self.project), 'source': 'startup'})
+        finally:
+            store.close()
+        return out['hookSpecificOutput']['additionalContext']
+
+    def test_global_scope_names_als(self):
+        text = self.start_text('global')
+        self.assertIn('`als start --plan FILE --session sid`', text)
+        self.assertNotIn('harness.py', text)
+
+    def test_project_scope_names_installed_harness(self):
+        self.assertIn('python3 .astra-luna-sol/harness.py start', self.start_text('project'))
+
+    def test_global_resume_command_uses_als(self):
+        store = Store(self.project, scope='global')
+        try:
+            rid = Engine(store).start({'goal': 'g', 'tasks': [], 'checks': [], 'criteria': []}, session='old')
+            self.assertTrue(hooks.resume_command(store, store.run(rid), 'new').startswith('als resume --run '))
+        finally:
+            store.close()
+
 
 if __name__ == '__main__':
     unittest.main()

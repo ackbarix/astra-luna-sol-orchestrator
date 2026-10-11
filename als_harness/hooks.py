@@ -25,7 +25,7 @@ def warn(message):
     return {'systemMessage': message[:1000]}
 
 
-DENY_FALLBACK = 'ALS guarded mode denied this spawn; inspect harness.py status for the reason.'
+DENY_FALLBACK = 'ALS guarded mode denied this spawn; inspect the harness status (als status) for the reason.'
 
 
 def deny(message):
@@ -107,10 +107,21 @@ def harness_script():
     return installed if installed.is_file() else home / 'scripts/harness.py'
 
 
+def cli_hint(store):
+    """How the user/HEAD invokes the harness for this store's scope."""
+    if getattr(store, 'scope', 'project') == 'global':
+        return 'als'
+    return 'python3 .astra-luna-sol/harness.py'
+
+
 def resume_command(store, run, sid):
     """Exact one-line resume for a run paused by a Codex SessionEnd. Never executed here."""
-    argv = ['python3', str(harness_script()), '--project', str(store.project), 'resume', '--run', run['id'],
-            '--session', sid]
+    if getattr(store, 'scope', 'project') == 'global':
+        # `als` resolves the project from the current repository.
+        argv = ['als', 'resume', '--run', run['id'], '--session', sid]
+    else:
+        argv = ['python3', str(harness_script()), '--project', str(store.project), 'resume', '--run', run['id'],
+                '--session', sid]
     if any(t['status'] in ACTIVE or t.get('claims_held') for t in store.tasks(run['id'])):
         argv.append('--workers-stopped')
     return ' '.join(shlex.quote(x) for x in argv)
@@ -154,7 +165,7 @@ def handle(store, payload):
         if event == 'SessionStart':
             pending = [r['id'] for r in store.runs() if r['status'] not in {'completed', 'cancelled'}][:4]
             message = ('ALS harness available; session ' + sid + '. Do not create a run for trivial work. '
-                       + 'Register a plan with harness.py start --session ' + sid
+                       + 'Register a plan with `' + cli_hint(store) + ' start --plan FILE --session ' + sid + '`'
                        + ' for managed work. Pending runs: ' + (','.join(pending) or 'none'))
             ended = session_end_runs(store)[:2]
             if ended:
@@ -179,7 +190,8 @@ def handle(store, payload):
                     store.save_run(r)
         return {}
     if event == 'SessionStart':
-        message = ('ALS run ' + rid + ' is ' + run['status'] + '. Inspect harness.py status before restarting any worker.'
+        message = ('ALS run ' + rid + ' is ' + run['status'] + '. Inspect `' + cli_hint(store) + ' status --run ' + rid
+                   + '` before restarting any worker.'
                    + ' A resumed chat is not an automatic task replay.')
         if run['status'] == 'paused' and run.get('paused_by_session_end'):
             # Same session id after resume/compact/clear: still no automatic reattach.

@@ -973,8 +973,9 @@ def global_mode(args) -> int:
         print("DRY RUN: nothing written, no Codex/OpenCodex calls")
         return EXIT_OK
     commit(als_home, plan, {k: session.snapshots[k] for k in plan}, session.modes, layout)
-    print("GLOBAL INSTALL OK " + VERSION + ": start Codex with `codex --profile als`; add hooks per project with "
-          + installer_command("/path/to/project", "--hooks-only"))
+    # Point at the installed entrypoint, not this clone, which may be deleted.
+    print("GLOBAL INSTALL OK " + VERSION + ": start Codex with `als run` (codex --profile als); "
+          + "add harness hooks per project with `cd PROJECT && als install --hooks-only`")
     if projects and any(h.get("groups") != hook_config.groups("global", als_home, h.get("interpreter"))
                         for h in projects.values()):
         print("NOTE: refresh project hooks with --hooks-only for: " + ", ".join(projects))

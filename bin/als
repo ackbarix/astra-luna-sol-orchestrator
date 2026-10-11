@@ -10,7 +10,7 @@ Usage: als COMMAND [ARGS]
                                        flags: --hooks-only --dry-run --check --adopt
                                        --skip-hooks --policy-file PATH --force-uninstall
   uninstall [PROJECT|--global] [FLAGS] remove ALS (same as install ... --uninstall)
-  doctor [--no-probe]                  check dependencies, then the harness in this project
+  doctor [--no-probe] [--json]         check dependencies, then the harness in this project
   run [CODEX ARGS]                     start Codex (`codex --profile als` when installed globally)
   plan new FILE                        write a minimal plan JSON template
   usage [ARGS]                         token usage report (usage.sh)
@@ -120,17 +120,28 @@ PLAN
 doctor() {
  need_python
  probe=
- [ "${1-}" = --no-probe ] && probe=--no-probe
+ json=
+ for arg in "$@"; do
+  case $arg in
+   --no-probe) probe=--no-probe ;;
+   --json) json=--json ;;
+   *) printf 'als doctor: unknown option %s (use --no-probe, --json)\n' "$arg" >&2; return 2 ;;
+  esac
+ done
  root=$(project_root)
  if [ -f "$als_home/als_harness/deps.py" ]; then pkg=$als_home
  elif [ -f "$root/.astra-luna-sol/als_harness/deps.py" ]; then pkg=$root/.astra-luna-sol
  else pkg=$release
  fi
  rc=0
- PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe || rc=$?
+ PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe $json || rc=$?
  if h=$(harness) && { [ -d "$root/.git" ] || [ -f "$root/.astra-luna-sol/harness.py" ]; }; then
   printf '\nHarness (%s):\n' "$root"
-  "$py" "$h" --project "$root" doctor || rc=$?
+  if [ -n "$json" ]; then
+   "$py" "$h" --project "$root" doctor || rc=$?
+  else
+   "$py" "$h" --project "$root" doctor --format text || rc=$?
+  fi
  fi
  return "$rc"
 }

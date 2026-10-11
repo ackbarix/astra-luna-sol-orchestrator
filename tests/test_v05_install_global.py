@@ -194,6 +194,23 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
         self.ok(self.als('uninstall', '--global'))
         self.assertFalse(self.als_home.exists())
 
+    def test_global_install_points_at_entrypoint_not_clone(self):
+        result = self.glob()
+        self.ok(result)
+        self.assertIn('als install --hooks-only', result.stdout)
+        self.assertNotIn(str(ROOT / 'install.sh'), result.stdout)
+
+    def test_doctor_is_human_text_by_default_and_json_on_request(self):
+        self.ok(self.glob())
+        text = self.als('doctor', '--no-probe')
+        self.assertEqual(text.returncode, 0, text.stdout + text.stderr)
+        self.assertFalse(text.stdout.lstrip().startswith('{'), text.stdout[:200])
+        self.assertNotIn('"hooks_configured"', text.stdout)
+        as_json = self.als('doctor', '--no-probe', '--json')
+        self.assertIn('"items"', as_json.stdout)
+        bad = self.als('doctor', '--bogus')
+        self.assertEqual(bad.returncode, 2)
+
     def test_als_run_without_profile_uses_plain_codex(self):
         self.ok(self.glob())
         (self.codex_home / 'als.config.toml').rename(self.base / 'saved')
