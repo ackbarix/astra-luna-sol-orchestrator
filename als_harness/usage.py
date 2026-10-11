@@ -25,6 +25,7 @@ TICK_BYTES = 1024 * 1024
 PRE_TOOL_SYNC_BYTES = 256 * 1024  # PreToolUse runs on every spawn; keep it cheap
 HEAD_BYTES = 4096
 SKIP_CHUNK = 64 * 1024
+TAIL_CONTEXT_BYTES = 1024 * 1024  # where an EOF anchor looks for the latest turn_context
 
 
 def sessions_base():
@@ -83,6 +84,104 @@ def checked_rollout(path, base=None):
     return p
 
 
+def cursor_key(path, rid):
+    return str(Path(path).expanduser()) + '#als-run=' + rid
+
+
+def last_line_end(f, size):
+    """Offset just past the last complete line (0 when there is none)."""
+    end = size
+    while end > 0:
+        start = max(0, end - SKIP_CHUNK)
+        f.seek(start)
+        chunk = f.read(end - start)
+        cut = chunk.rfind(b'\n')
+        if cut >= 0:
+            return start + cut + 1
+        end = start
+    return 0
+
+
+def eof_cursor(path, base=None):
+    """Cursor for `path` at its last complete line, so a run never spends its
+    sync budget on session history written before it existed.
+
+    Keeps what later records need: the session_meta lineage (first line)
+    and the most recent turn_context found in the last TAIL_CONTEXT_BYTES.
+    Raises OSError/HarnessError for a missing or unacceptable file.
+    """
+    p = checked_rollout(path, base)
+    with p.open('rb') as f:
+        stat = os.fstat(f.fileno())
+        cursor = {'file_key': [stat.st_dev, stat.st_ino, head_digest(f)], 'offset': 0, 'context': {},
+                  'contexts': {}, 'meta': None, 'anchored_at_eof': True}
+        offset = last_line_end(f, stat.st_size)
+        cursor['offset'] = offset
+        f.seek(0)
+        first = f.readline(MAX_LINE + 1)
+        try:
+            o = json.loads(first) if first.endswith(b'\n') else None
+        except (ValueError, UnicodeError):
+            o = None
+        if isinstance(o, dict) and o.get('type') == 'session_meta' and isinstance(o.get('payload'), dict):
+            cursor['meta'] = lineage(o['payload'])
+        start = max(len(first), offset - TAIL_CONTEXT_BYTES)
+        f.seek(start)
+        if start > len(first):
+            skip_line(f)
+        while f.tell() < offset:
+            raw = f.readline(MAX_LINE + 1)
+            if not raw or not raw.endswith(b'\n'):
+                if raw and len(raw) > MAX_LINE:
+                    skip_line(f)
+                    continue
+                break
+            if b'turn_context' not in raw:
+                continue
+            try:
+                o = json.loads(raw)
+            except (ValueError, UnicodeError):
+                continue
+            data = o.get('payload') if isinstance(o, dict) else None
+            if isinstance(data, dict) and o.get('type') == 'turn_context':
+                context = {'model': data.get('model', 'unknown'),
+                           'effort': data.get('effort', data.get('reasoning_effort', 'unknown'))}
+                cursor['context'] = context
+                if data.get('turn_id'):
+                    cursor['contexts'][data['turn_id']] = context
+                    if len(cursor['contexts']) > 100:
+                        cursor['contexts'].pop(next(iter(cursor['contexts'])))
+    return cursor
+
+
+def session_sources(store, session):
+    """Transcripts registered for a session with their recorded sessions base."""
+    receipt = (store.get('sessions', session) if session else None) or {}
+    bases = receipt.get('transcript_bases') or {}
+    return {p: bases.get(p) for p in receipt.get('transcripts', [])}
+
+
+def eof_anchors(store, session):
+    """[(path, cursor)] for every readable transcript of a session. Call
+    BEFORE the transaction that creates/rebinds the run, so lines written
+    after the anchor are still read (records older than the run are
+    excluded by timestamp)."""
+    anchors = []
+    for path, base in sorted(session_sources(store, session).items()):
+        try:
+            anchors.append((path, eof_cursor(path, base)))
+        except (OSError, HarnessError):
+            continue  # unreadable now: sync reports it later
+    return anchors
+
+
+def store_anchors(store, rid, anchors):
+    """Insert anchors for a run inside the caller's transaction; a cursor that
+    already exists for this run is never moved."""
+    for path, cursor in anchors:
+        store.db.execute('INSERT OR IGNORE INTO cursors VALUES(?,?)', (cursor_key(path, rid), encoded(cursor)))
+
+
 def sync_path(store, run, path, base=None, limit=TICK_BYTES):
     """Only registered, readable rollouts under CODEX_HOME/sessions; at most `limit` bytes per tick.
 
@@ -90,8 +189,8 @@ def sync_path(store, run, path, base=None, limit=TICK_BYTES):
     the current process environment is only a fallback for legacy registrations.
     """
     p = checked_rollout(path, base)
-    cursor_key = str(p) + '#als-run=' + run['id']
-    old = store.get('cursors', cursor_key, 'path') or {}
+    key_name = cursor_key(p, run['id'])
+    old = store.get('cursors', key_name, 'path') or {}
     consumed = 0
     events = []
     notes = []
@@ -198,8 +297,9 @@ def sync_path(store, run, path, base=None, limit=TICK_BYTES):
             if previous and previous['doc'] != encoded(event):
                 notes.append('conflicting response ID; first record retained')
             store.db.execute('INSERT OR IGNORE INTO usage VALUES(?,?,?,?)', (run['id'], thread, response, encoded(event)))
+        cursor['synced_at'] = now()
         store.db.execute('INSERT INTO cursors VALUES(?,?) ON CONFLICT(path) DO UPDATE SET doc=excluded.doc',
-                         (cursor_key, encoded(cursor)))
+                         (key_name, encoded(cursor)))
         r = store.run(run['id'])
         r['warnings'] = sorted(set(r['warnings']) | set(notes))[:100]
         has_usage = store.db.execute('SELECT 1 FROM usage WHERE run=? LIMIT 1', (run['id'],)).fetchone()
@@ -223,12 +323,25 @@ def registered_sources(store, run):
     return sources
 
 
+def last_synced(store, rid, path):
+    cursor = store.get('cursors', cursor_key(path, rid), 'path') or {}
+    stamp = cursor.get('synced_at')
+    return stamp if isinstance(stamp, (int, float)) else 0
+
+
 def sync(engine, rid, limit=None):
-    """Incremental sync of every registered rollout. `limit` caps total bytes for this call."""
+    """Incremental sync of every registered rollout. `limit` caps total bytes for this call.
+
+    Sources are served least-recently-synced first, so a busy HEAD transcript
+    cannot starve worker rollouts when the per-call budget runs out.
+    """
     r = engine.s.run(rid)
     remaining = limit
     results = []
-    for p, base in sorted(registered_sources(engine.s, r).items()):
+    sources = registered_sources(engine.s, r)
+    order = sorted(sources, key=lambda p: (last_synced(engine.s, rid, p), p))
+    for p in order:
+        base = sources[p]
         if remaining is not None and remaining <= 0:
             break
         try:

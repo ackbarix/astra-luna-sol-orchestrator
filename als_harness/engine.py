@@ -10,7 +10,7 @@ import uuid
 from .common import (ACTIVE, TERMINAL, ROLES, HarnessError, boot_id, checked_path, counted_tokens, digest, ident,
                      now, overlap, process_alive, process_start, relative)
 from .snapshot import capture
-from . import efficiency
+from . import efficiency, usage
 
 # Attempt states that are already closed and must not be rewritten.
 ATTEMPT_FINAL = {'completed', 'failed', 'interrupted', 'cancelled'}
@@ -131,6 +131,8 @@ class Engine:
             if root is None:
                 raise HarnessError('Worktree is not part of this project\'s repository: ' + str(worktree))
         baseline = capture(root)
+        # HEAD transcripts already hold pre-run history: start their cursors at EOF.
+        anchors = usage.eof_anchors(self.s, session) if session else []
         with self.s.tx():
             if session and self.s.for_session(session):
                 raise HarnessError('Session already has an unfinished run')
@@ -148,6 +150,7 @@ class Engine:
             for task in p['tasks']:
                 item = dict(task, run=rid, status='pending', attempts=[], result=None)
                 self.s.save_task(item)
+            usage.store_anchors(self.s, rid, anchors)
             self.s.event('start:' + rid, rid, 'run_started', {'mode': mode, 'requested_head': 'gpt-6-astra/medium'})
         return rid
 
@@ -634,6 +637,7 @@ class Engine:
         recorded check group.
         """
         snapshot = self.snapshot(rid)
+        anchors = usage.eof_anchors(self.s, session) if session else []
         with self.s.tx():
             run = self.s.run(rid)
             if run['status'] == 'cancelled':
@@ -654,6 +658,7 @@ class Engine:
                 if other and other['id'] != rid:
                     raise HarnessError('Session bound to another run')
                 run['session'] = session
+                usage.store_anchors(self.s, rid, anchors)
             if workers_stopped:
                 for task in active:
                     task['status'] = 'failed'

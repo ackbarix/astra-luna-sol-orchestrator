@@ -191,6 +191,12 @@ def handle(store, payload):
                     store.save_run(r)
         return {}
     if event == 'SessionStart':
+        if run.get('session') == sid:
+            # A newly registered transcript of this run's session: skip its history.
+            anchors = usage.eof_anchors(store, sid)
+            if anchors:
+                with store.tx():
+                    usage.store_anchors(store, rid, anchors)
         message = ('ALS run ' + rid + ' is ' + run['status'] + '. Inspect `' + cli_hint(store) + ' status --run ' + rid
                    + '` before restarting any worker.'
                    + ' A resumed chat is not an automatic task replay.')

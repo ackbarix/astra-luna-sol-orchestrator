@@ -141,9 +141,11 @@ class UsageAuditTests(unittest.TestCase):
     # 7e
     def test_registered_base_used_instead_of_hook_env(self):
         r = self.e.start({'goal': 'usage'}, 'sid')
-        self.write([meta('sid'), record('r1')])
+        self.write([meta('sid')])
         hooks.handle(self.s, {'hook_event_name': 'SessionStart', 'session_id': 'sid', 'cwd': str(self.project),
                               'transcript_path': str(self.log), 'source': 'startup'})
+        # 0.5.0 r3: a transcript registered for a running session starts at EOF.
+        self.write([record('r1')], 'a')
         receipt = self.s.get('sessions', 'sid')
         self.assertEqual(receipt['transcript_bases'][str(self.log)], str((self.home / 'sessions').resolve()))
         with patch.dict(os.environ, {'CODEX_HOME': str(Path(self.tmp.name) / 'other-home')}):
