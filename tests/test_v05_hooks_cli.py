@@ -15,6 +15,20 @@ from als_harness import cli, hooks
 from als_harness.engine import Engine
 
 ROOT = Path(__file__).resolve().parents[1]
+FAKE_CODEX = ('#!/bin/sh\nif [ "$1" = features ]; then printf "hooks stable true\\nmulti_agent stable true\\n"; '
+              'else echo "codex-cli 9.9.9"; fi\n')
+
+
+def fake_codex_dir(base):
+    """Directory holding a fake `codex` so doctor never depends on the host's Codex CLI."""
+    folder = Path(base) / 'fake-bin'
+    folder.mkdir(exist_ok=True)
+    exe = folder / 'codex'
+    exe.write_text(FAKE_CODEX)
+    exe.chmod(0o755)
+    return folder
+
+
 GIT_ENV = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
            'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
 
@@ -202,8 +216,11 @@ class CliScopeTests(unittest.TestCase):
     def test_doctor_global_reads_codex_home(self):
         command = 'python3 "$HOME/.local/share/als/harness.py" hook'
         (self.codex / 'hooks.json').write_text(json.dumps(self.hooks_doc(cli.DOCTOR_EVENTS, command)))
-        code, out, _ = self.main('doctor')
-        self.assertEqual(code, 0)
+        # A fake codex on PATH: the exit code must not depend on the host's Codex install.
+        fake = str(fake_codex_dir(self.tmp.name))
+        with patch.dict(os.environ, {'PATH': fake + os.pathsep + os.environ.get('PATH', '')}):
+            code, out, err = self.main('doctor')
+        self.assertEqual(code, 0, out + err)
         data = json.loads(out)
         self.assertTrue(data['hooks_configured'], data)
         self.assertEqual(data['scope'], 'global')

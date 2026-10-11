@@ -197,7 +197,7 @@ def doctor_text(result):
         if item.get('hint'):
             line += ' -> ' + str(item['hint'])
         problems.append(line)
-    if result.get('deps', {}).get('ok') is None:
+    if 'deps' in result and result['deps'].get('ok') is None:
         lines.append('deps:   not checked (' + str(result.get('deps', {}).get('note')) + ')')
     failed = sum(p.startswith('FAIL') for p in problems)
     warned = len(problems) - failed
@@ -209,7 +209,12 @@ def doctor_text(result):
     return '\n'.join(lines + problems)
 
 
-def doctor(project, store, probe=False, scope='project', deps_probe=True):
+def doctor(project, store, probe=False, scope='project', deps_probe=True, with_deps=True):
+    """Hook/state report plus the embedded dependency check.
+
+    with_deps=False (`--no-deps`) omits the 'deps' section entirely, for
+    callers such as bin/als that already ran deps.check() themselves; the
+    exit code then reflects only usage/state errors."""
     issues = []
     checked, found_in, configured = [], {}, set()
     for path in hooks_files(project):
@@ -244,7 +249,8 @@ def doctor(project, store, probe=False, scope='project', deps_probe=True):
               'paid_model_calls': False, 'hook_trust_verified': False, 'blocking_behavior_verified': False,
               'note': 'Review/trust with /hooks. Observed callbacks and fixtures are not an end-to-end proof'
                       ' of installed Codex enforcement.'}
-    result['deps'] = dependency_report(project, deps_probe)
+    if with_deps:
+        result['deps'] = dependency_report(project, deps_probe)
     if probe:
         result['probes'] = {}
         for key, cmd in {'version': ['codex', '--version'], 'features': ['codex', 'features', 'list']}.items():
@@ -280,7 +286,11 @@ def parser():
                                              ' fails, 2 on a usage or state error.')
     d.add_argument('--probe', action='store_true', help='Also run `codex --version` / `codex features list`.')
     d.add_argument('--no-probe', action='store_true',
-                   help='Do not run external probes in the dependency check (deps.check(probe=False)).')
+                   help='Dependency check without `codex features list` (the codex-feature items are omitted);'
+                        ' `codex --version`, `git --version` and `ocx --version` still run once.')
+    d.add_argument('--no-deps', action='store_true',
+                   help='Skip the embedded dependency check entirely (no "deps" section, no external programs'
+                        ' unless --probe); for callers that already ran it.')
     d.add_argument('--format', choices=['json', 'text'], default='json')
     sub.add_parser('hook')
     status = sub.add_parser('status', help='Unfinished runs (all with --all), or one run with --run.')
@@ -423,7 +433,7 @@ def dispatch(args, store):
             out['warnings'] = [problem]
             print('ALS WARNING: ' + problem, file=sys.stderr)
     elif args.cmd == 'doctor':
-        out = doctor(store.project, store, args.probe, args.scope, not args.no_probe)
+        out = doctor(store.project, store, args.probe, args.scope, not args.no_probe, not args.no_deps)
         code = out['exit_code']
     elif args.cmd == 'status':
         if args.run:
@@ -518,7 +528,12 @@ def offline(args, project):
 
 def emit(args, out):
     if getattr(args, 'format', 'json') == 'text':
-        text = doctor_text(out) if args.cmd == 'doctor' else status_text(out) if args.cmd == 'status' else None
+        if args.cmd == 'doctor':
+            text = doctor_text(out)
+        elif args.cmd == 'status':
+            text = status_text(out) if 'runs' in out else report.run_text(out)
+        else:
+            text = None
         if text is not None:
             print(text)
             return
@@ -548,7 +563,7 @@ def main(argv=None):
         if args.cmd in ('status', 'doctor') and not state_path(project, args.scope).exists():
             code = 0
             if args.cmd == 'doctor':
-                out = doctor(project, None, args.probe, args.scope, not args.no_probe)
+                out = doctor(project, None, args.probe, args.scope, not args.no_probe, not args.no_deps)
                 code = out['exit_code']
             else:
                 out = {'runs': [], 'note': 'No managed runs registered', 'next': 'harness.py start --plan <plan.json>'}

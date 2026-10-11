@@ -8,7 +8,13 @@ and `ocx --version`, each with a 10 second timeout (override with the
     check(project=None, probe=True, timeout=None) -> {'ok': bool, 'items': [item, ...]}
 
 Each item is {'name', 'found', 'required', 'ok', 'hint'}. 'ok' at the top is
-true when every required item is ok; optional items only carry hints.
+true when every required item is ok; optional items only carry hints. An item
+whose state could not be determined has 'ok': None and is never required: a
+`codex features list` that cannot run or fails is not proof that a feature is
+disabled. A missing codex binary stays a required failure.
+
+probe=False (`--no-probe`) skips only `codex features list`; `codex --version`
+still runs once so a missing or broken Codex CLI is reported.
 """
 from __future__ import annotations
 
@@ -31,7 +37,17 @@ CODEX_FEATURES = {
 
 
 def _item(name, found, ok, hint='', required=True):
-    return {'name': name, 'found': found, 'required': required, 'ok': bool(ok), 'hint': '' if ok else hint}
+    ok = None if ok is None else bool(ok)
+    return {'name': name, 'found': found, 'required': required, 'ok': ok, 'hint': '' if ok else hint}
+
+
+def _current_timeout():
+    return _timeout if _timeout is not None else default_timeout()
+
+
+def _timeout_hint(what):
+    return (what + ' did not answer within ' + ('%g' % _current_timeout())
+            + 's; raise ALS_DEPS_TIMEOUT (or --timeout) and retry')
 
 
 def default_timeout():
@@ -49,7 +65,7 @@ _timeout = None  # set by check() for the duration of one report
 def _run(argv):
     try:
         done = subprocess.run(argv, capture_output=True, text=True,
-                              timeout=_timeout if _timeout is not None else default_timeout(),
+                              timeout=_current_timeout(),
                               stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as ex:
         return None, type(ex).__name__
@@ -124,21 +140,31 @@ def codex_items(probe=True):
     if not exe:
         return [_item('codex', None, False, 'install the Codex CLI (npm i -g @openai/codex) and put it on PATH')]
     code, out = _run([exe, '--version'])
-    items = [_item('codex', (out.strip().splitlines() or ['?'])[0] if code == 0 else 'unusable (' + exe + ')',
-                   code == 0, '`codex --version` failed; reinstall the Codex CLI')]
+    if code is None and out == 'TimeoutExpired':
+        items = [_item('codex', 'timed out (' + exe + ')', False, _timeout_hint('codex'))]
+    else:
+        items = [_item('codex', (out.strip().splitlines() or ['?'])[0] if code == 0 else 'unusable (' + exe + ')',
+                       code == 0, '`codex --version` failed; reinstall the Codex CLI')]
     if not probe or code != 0:
         return items
     code, out = _run([exe, 'features', 'list'])
+    if code != 0:
+        # Could not ask Codex: unknown, not disabled, and never a required failure.
+        reason = (_timeout_hint('`codex features list`') if code is None and out == 'TimeoutExpired'
+                  else 'could not run `codex features list`')
+        for feature, hint in CODEX_FEATURES.items():
+            items.append(_item('codex-feature:' + feature, 'unknown', None,
+                               reason + '; verify manually (' + hint + ')', required=False))
+        return items
     states = {}
-    for line in (out or '').splitlines() if code == 0 else []:
+    for line in (out or '').splitlines():
         parts = line.split()
         if len(parts) >= 2 and parts[-1] in ('true', 'false'):
             states[parts[0]] = parts[-1] == 'true'
     for feature, hint in CODEX_FEATURES.items():
         state = states.get(feature)
-        found = None if code != 0 else ('enabled' if state else 'disabled' if state is False else 'unknown')
-        items.append(_item('codex-feature:' + feature, found, state is True,
-                           hint if code == 0 else '`codex features list` failed; ' + hint))
+        found = 'enabled' if state else 'disabled' if state is False else 'unknown'
+        items.append(_item('codex-feature:' + feature, found, state is True, hint))
     return items
 
 
@@ -174,6 +200,14 @@ def conflict_items(project=None):
     if project is None:
         return items
     project = Path(project)
+    try:
+        same_home = (project / '.codex').resolve() == codex_home().resolve()
+    except OSError:
+        same_home = False
+    if same_home:
+        # Run from $HOME (or wherever CODEX_HOME lives): the project's .codex IS
+        # the global Codex home, so nothing can shadow anything.
+        return items
     local_agents = sorted(p.name for p in (project / '.codex/agents').glob('als_*.toml'))
     shadowed = sorted(set(local_agents) & set(global_agents))
     items.append(_item('conflict:agent-roles', ', '.join(shadowed) or 'none', not shadowed,
@@ -201,7 +235,8 @@ def check(project: Path | None = None, probe: bool = True, timeout: float | None
 def render(result):
     lines = []
     for item in result['items']:
-        mark = 'ok  ' if item['ok'] else ('FAIL' if item['required'] else 'warn')
+        mark = ('ok  ' if item['ok'] else 'unk ' if item['ok'] is None
+                else 'FAIL' if item['required'] else 'warn')
         lines.append('[' + mark + '] ' + item['name'] + ': ' + str(item['found']))
         if item['hint']:
             lines.append('       -> ' + item['hint'])
@@ -213,7 +248,9 @@ def main(argv=None):
     import argparse
     ap = argparse.ArgumentParser(description='Check ALS dependencies (never calls a model)')
     ap.add_argument('--project', type=Path)
-    ap.add_argument('--no-probe', action='store_true', help='skip `codex features list`')
+    ap.add_argument('--no-probe', action='store_true',
+                    help='skip `codex features list` (the codex-feature items are omitted); '
+                         '`codex --version` still runs once')
     ap.add_argument('--json', action='store_true')
     ap.add_argument('--timeout', type=float, default=None,
                     help='seconds per external probe (default: $ALS_DEPS_TIMEOUT or 10)')

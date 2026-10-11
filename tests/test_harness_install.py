@@ -1,5 +1,6 @@
 """Installer/hook coexistence and installed entrypoint tests, no Codex calls."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,20 @@ import install
 
 ROOT=Path(__file__).resolve().parents[1]
 
+
+FAKE_CODEX = ('#!/bin/sh\nif [ "$1" = features ]; then printf "hooks stable true\\nmulti_agent stable true\\n"; '
+              'else echo "codex-cli 9.9.9"; fi\n')
+
+
+def fake_codex_dir(base):
+    """Directory holding a fake `codex` so doctor never depends on the host's Codex CLI."""
+    folder = Path(base) / 'fake-bin'
+    folder.mkdir(exist_ok=True)
+    exe = folder / 'codex'
+    exe.write_text(FAKE_CODEX)
+    exe.chmod(0o755)
+    return folder
+
 class HarnessInstallTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.p=Path(self.tmp.name)/'project';self.p.mkdir()
@@ -27,9 +42,12 @@ class HarnessInstallTests(unittest.TestCase):
         self.assertTrue((self.p/'.codex/hooks.json').exists())
         for name in ('harness.py','als_harness/state.py','als_harness/engine.py','harness-guide.md'):
             self.assertTrue((self.p/'.astra-luna-sol'/name).is_file())
-        r=subprocess.run([sys.executable,str(self.p/'.astra-luna-sol/harness.py'),'doctor'],capture_output=True,text=True)
+        # A fake codex on PATH: the result must not depend on the host's Codex install.
+        env=dict(os.environ,PATH=str(fake_codex_dir(self.tmp.name))+os.pathsep+os.environ.get('PATH',''))
+        r=subprocess.run([sys.executable,str(self.p/'.astra-luna-sol/harness.py'),'doctor'],capture_output=True,text=True,env=env)
         self.assertEqual(r.returncode,0,r.stderr)
         d=json.loads(r.stdout);self.assertTrue(d['hooks_configured']);self.assertFalse(d['paid_model_calls'])
+        self.assertIn('codex-cli 9.9.9',[i['found'] for i in d['deps']['items'] if i['name']=='codex'])
         self.assertFalse((self.p/'.astra-luna-sol/state').exists())
     def test_user_hooks_survive_upgrade_uninstall(self):
         self.p.joinpath('.codex').mkdir()
