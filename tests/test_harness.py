@@ -195,7 +195,10 @@ class HarnessTests(unittest.TestCase):
     def test_cli_full_head_only_flow(self):
         plan=self.project/'plan.json';plan.write_text(json.dumps(self.plan()))
         script=Path(__file__).resolve().parents[1]/'scripts/harness.py'
-        env={**os.environ,'ALS_STATE_HOME':str(Path(self.tmp.name)/'als-state')}  # repo script runs in global scope
+        # Repo script runs in global scope. Never inherit the caller's ALS_* or
+        # Codex session variables (e.g. an exported CODEX_THREAD_ID).
+        env={k:v for k,v in os.environ.items() if not k.startswith('ALS_') and k!='CODEX_THREAD_ID'}
+        env.update(ALS_STATE_HOME=str(Path(self.tmp.name)/'als-state'),CODEX_HOME=str(Path(self.tmp.name)/'codex'))
         def call(*args):return subprocess.run([sys.executable,str(script),'--project',str(self.project),*args],capture_output=True,text=True,env=env)
         s=call('start','--plan',str(plan));self.assertEqual(s.returncode,0,s.stderr);rid=json.loads(s.stdout)['run']
         self.assertEqual(call('complete','--run',rid).returncode,3)

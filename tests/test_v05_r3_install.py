@@ -523,6 +523,9 @@ class DepsTimeoutTests(unittest.TestCase):
             codex = Path(tmp) / 'codex'
             codex.write_text('#!/bin/sh\nexec sleep 30\n')
             codex.chmod(0o755)
+            ocx = Path(tmp) / 'ocx'  # never run the host's OpenCodex launcher
+            ocx.write_text('#!/bin/sh\necho ocx 0.0.0\n')
+            ocx.chmod(0o755)
             with mock.patch.dict(os.environ, {'PATH': tmp + os.pathsep + os.environ.get('PATH', '')}):
                 start = time.monotonic()
                 items = {i['name']: i for i in deps.check(None, probe=False, timeout=1)['items']}

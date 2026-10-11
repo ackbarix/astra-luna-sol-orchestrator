@@ -141,6 +141,18 @@ def item(name, ok, required=True, hint='fix it'):
 
 
 class DoctorTests(CliCase):
+    def setUp(self):
+        super().setUp()
+        # Some tests use the real deps module; never run the host's `codex`.
+        fake = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        (fake / 'codex').write_text('#!/bin/sh\nif [ "$1" = features ]; then printf "hooks stable true\\nmulti_agent stable true\\n"; else echo "codex-cli 9.9.9"; fi\n')
+        (fake / 'codex').chmod(0o755)
+        (fake / 'ocx').write_text('#!/bin/sh\necho ocx 0.0.0\n')  # deps runs `ocx --version`
+        (fake / 'ocx').chmod(0o755)
+        path_patch = patch.dict(os.environ, {'PATH': str(fake) + os.pathsep + os.environ.get('PATH', '')})
+        path_patch.start()
+        self.addCleanup(path_patch.stop)
+
     def write_project_hooks(self, command):
         (self.project / '.codex').mkdir(exist_ok=True)
         (self.project / '.codex/hooks.json').write_text(json.dumps(hooks_doc(command)))

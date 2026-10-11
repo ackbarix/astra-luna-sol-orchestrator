@@ -29,6 +29,9 @@ def fake_codex_dir(base):
     exe = folder / 'codex'
     exe.write_text(FAKE_CODEX)
     exe.chmod(0o755)
+    ocx = folder / 'ocx'  # deps also runs `ocx --version`
+    ocx.write_text('#!/bin/sh\necho ocx 0.0.0\n')
+    ocx.chmod(0o755)
     return folder
 
 class HarnessInstallTests(unittest.TestCase):

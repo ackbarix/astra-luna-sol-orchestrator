@@ -29,6 +29,13 @@ class Sandbox:
         # e.g. an exported ALS_BIN_DIR would install `als` into a real bin dir.
         for name in [k for k in self.env if k.startswith('ALS_')] + ['CODEX_THREAD_ID']:
             self.env.pop(name, None)
+        # `als doctor` runs `ocx --version` (optional dependency); never run the
+        # host's OpenCodex launcher from tests.
+        fake = self.base / 'fake-ocx'
+        fake.mkdir()
+        (fake / 'ocx').write_text('#!/bin/sh\necho ocx 0.0.0\n')
+        (fake / 'ocx').chmod(0o755)
+        self.env['PATH'] = str(fake) + os.pathsep + self.env.get('PATH', '')
         self.p = self.repo('project')
 
     def tearDown(self):

@@ -30,6 +30,17 @@ ROOT = base.ROOT
 
 @unittest.skipUnless(HAVE_TOML, 'installer project mode needs tomllib or tomli')
 class InstalledHookTests(base.Sandbox, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        # The hook-derived doctor probes `codex`; never run the host's binary.
+        fake = self.base / 'fakebin'
+        fake.mkdir()
+        (fake / 'codex').write_text('#!/bin/sh\nif [ "$1" = features ]; then printf "hooks stable true\\nmulti_agent stable true\\n"; else echo "codex-cli 9.9.9"; fi\n')
+        (fake / 'codex').chmod(0o755)
+        (fake / 'ocx').write_text('#!/bin/sh\necho ocx 0.0.0\n')  # deps runs `ocx --version`
+        (fake / 'ocx').chmod(0o755)
+        self.env['PATH'] = str(fake) + os.pathsep + self.env.get('PATH', '')
+
     def hook_command(self, project):
         hooks = json.loads((project / '.codex/hooks.json').read_text())
         return hooks['hooks']['Stop'][0]['hooks'][0]['command']

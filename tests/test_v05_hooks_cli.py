@@ -26,6 +26,9 @@ def fake_codex_dir(base):
     exe = folder / 'codex'
     exe.write_text(FAKE_CODEX)
     exe.chmod(0o755)
+    ocx = folder / 'ocx'  # deps also runs `ocx --version`
+    ocx.write_text('#!/bin/sh\necho ocx 0.0.0\n')
+    ocx.chmod(0o755)
     return folder
 
 
@@ -51,7 +54,9 @@ class CliScopeTests(unittest.TestCase):
         self.codex.mkdir()
         # Never touch the real ~/.codex or ~/.local/state.
         self.env = patch.dict(os.environ, {'ALS_STATE_HOME': str(base / 'als-state'), 'CODEX_HOME': str(self.codex),
-                                           'CODEX_THREAD_ID': ''})
+                                           'CODEX_THREAD_ID': '',
+                                           # doctor probes `codex`; never run the host's binary
+                                           'PATH': str(fake_codex_dir(base)) + os.pathsep + os.environ.get('PATH', '')})
         self.env.start()
         self.plan = base / 'plan.json'
         self.plan.write_text(json.dumps({'goal': 'cli audit', 'tasks': [{'id': 'one', 'role': 'als_worker',
