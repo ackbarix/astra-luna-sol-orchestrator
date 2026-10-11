@@ -326,6 +326,7 @@ class VerificationLockTests(EngineCase):
 
     def spawn_verify(self, rid):
         code = ('import sys, faulthandler, signal; faulthandler.register(signal.SIGUSR1, all_threads=True);'
+                'faulthandler.dump_traceback_later(5, repeat=True);'
                 'sys.path.insert(0, sys.argv[1]); from pathlib import Path;'
                 'from als_harness.state import Store; from als_harness.engine import Engine;'
                 'from als_harness import verify;'
@@ -369,7 +370,7 @@ class VerificationLockTests(EngineCase):
         if verify_proc is not None and verify_proc.poll() is None:
             os.kill(verify_proc.pid, signal.SIGUSR1)
             time.sleep(1)
-            stack = self.verify_err.read_text(errors='replace')[-3000:]
+            stack = self.verify_err.read_text(errors='replace')[-12000:]
         self.fail('check group leader %s still alive: process_info=%r recorded_start=%r ps=%r verify_rc=%r\n'
                   'verify stack:\n%s'
                   % (pid, process_info(pid), start, raw.stdout.strip(),
