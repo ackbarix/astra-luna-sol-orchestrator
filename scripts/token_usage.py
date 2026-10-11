@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -32,12 +33,23 @@ def add_usage(target, usage):
         target[key] += usage[key]
 
 
+FRACTION = re.compile(r"\.(\d+)(?=[+-]\d\d:\d\d$|$)")
+
+
 def parse_ts(value):
-    try:
-        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return result.astimezone(UTC) if result.tzinfo else None
-    except (ValueError, AttributeError, TypeError):
+    """Aware UTC datetime or None. Python 3.9/3.10 fromisoformat rejects a "Z"
+    suffix and fractions other than 3 or 6 digits, so normalize both first."""
+    if not isinstance(value, str):
         return None
+    text = value.strip()
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    text = FRACTION.sub(lambda m: "." + (m.group(1) + "000000")[:6], text, count=1)
+    try:
+        result = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return result.astimezone(UTC) if result.tzinfo else None
 
 
 def iso(value):
