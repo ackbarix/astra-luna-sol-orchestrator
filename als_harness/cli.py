@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from .common import HarnessError, checked_path, now, redact
+from .common import hint_cmd, HarnessError, checked_path, now, redact
 from .engine import Engine, validate_plan
 from .state import Store
 from . import state, hooks, report, usage, verify, efficiency, telemetry
@@ -32,17 +32,6 @@ def detect_scope(home=HOME):
     if home.name == '.astra-luna-sol' and (home / 'harness.py').is_file():
         return 'project'
     return 'global'
-
-
-def hint_cmd():
-    """The command users should type in follow-up hints.
-
-    `als` when it is on PATH (it resolves the project and prefers a project
-    harness); otherwise this harness by absolute path, so the hint also works
-    from subdirectories, worktrees and global installs without `als`."""
-    if shutil.which('als'):
-        return 'als'
-    return shlex.quote(sys.executable) + ' ' + shlex.quote(str(HOME / 'harness.py'))
 
 
 def git_project(cwd):

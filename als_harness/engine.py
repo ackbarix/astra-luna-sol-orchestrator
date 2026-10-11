@@ -8,7 +8,7 @@ import signal
 import subprocess
 import uuid
 from .common import (ACTIVE, TERMINAL, ROLES, HarnessError, boot_id, checked_path, counted_tokens, digest, ident,
-                     current_uid, now, overlap, process_alive, process_info, process_start, relative)
+                     current_uid, hint_cmd, now, overlap, process_alive, process_info, process_start, relative)
 from .snapshot import capture
 from . import efficiency, usage
 
@@ -57,8 +57,9 @@ def validate_plan(plan):
             raise HarnessError('Criterion requires description and boolean required')
     prepared = 'efficiency' in p
     if not prepared and any(isinstance(t, dict) and 'role' not in t for t in p['tasks']):
-        raise HarnessError('plan not prepared: run `als prepare --plan FILE > prepared.json`'
-                           ' then `als start --plan prepared.json`')
+        cmd = hint_cmd()
+        raise HarnessError('plan not prepared: run `' + cmd + ' prepare --plan FILE > prepared.json`'
+                           ' then `' + cmd + ' start --plan prepared.json`')
     for task in p['tasks']:
         forbidden = {k for k in RUNTIME_TASK_KEYS & task.keys() if not (k == 'executor' and prepared)}
         if forbidden:

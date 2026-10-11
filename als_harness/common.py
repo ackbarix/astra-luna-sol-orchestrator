@@ -10,6 +10,26 @@ import sys
 import time
 
 
+
+# Directory holding this harness (als_harness/ and harness.py when installed).
+HARNESS_HOME = Path(__file__).resolve().parents[1]
+
+
+def hint_cmd():
+    """The command users should type in follow-up hints.
+
+    `als` when it is on PATH (it resolves the project and prefers a project
+    harness); otherwise this harness by absolute path, so the hint also works
+    from subdirectories, worktrees and global installs without `als`."""
+    import shlex
+    import shutil
+    if shutil.which('als'):
+        return 'als'
+    script = HARNESS_HOME / 'harness.py'  # installed layout
+    if not script.is_file():
+        script = HARNESS_HOME / 'scripts/harness.py'  # running from a clone
+    return shlex.quote(sys.executable) + ' ' + shlex.quote(str(script))
+
 class HarnessError(ValueError):
     """An unsafe, unsupported or incomplete operation; never a model failure."""
 

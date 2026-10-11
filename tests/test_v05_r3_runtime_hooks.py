@@ -42,8 +42,9 @@ class HookAndPlanTests(unittest.TestCase):
             self.e.start({'goal': 'g', 'tasks': [{'id': 'one', 'kind': 'exploration'}]})
         message = str(ctx.exception)
         self.assertIn('plan not prepared', message)
-        self.assertIn('als prepare --plan FILE > prepared.json', message)
-        self.assertIn('als start --plan prepared.json', message)
+        # The command is `als` when on PATH, else this harness by absolute path.
+        self.assertRegex(message, r'`(als|\S+ \S*harness\.py) prepare --plan FILE > prepared\.json`')
+        self.assertRegex(message, r'`(als|\S+ \S*harness\.py) start --plan prepared\.json`')
 
     def test_explicit_unknown_role_still_rejected(self):
         with self.assertRaises(HarnessError) as ctx:
