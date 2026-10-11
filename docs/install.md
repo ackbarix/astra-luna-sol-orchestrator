@@ -4,6 +4,13 @@
 
 ## 요구 사항
 
+설치 전에 바뀔 내용만 보려면 `sh setup.sh --dry-run`(전역) 또는 `als install PROJECT --dry-run`을
+실행하세요. 아무것도 쓰지 않습니다.
+
+전역 설치의 모델 기본값은 `$CODEX_HOME/als.config.toml` 프로필로 들어가며 `codex --profile als`
+(`als run`)로 적용됩니다. 사용 중인 Codex 버전이 이 프로필을 읽는지는 Codex 안에서 `/status`로
+모델이 GPT-6 Astra / Medium인지 확인하세요.
+
 | 항목 | 조건 |
 |---|---|
 | OS / 셸 | Linux 또는 macOS, POSIX `sh` (dash/bash) |

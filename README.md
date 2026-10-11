@@ -24,10 +24,12 @@ sh setup.sh
 als doctor        # 필요한 프로그램이 다 있는지 점검
 ```
 
-`[FAIL]`이 있으면 그 줄의 안내대로 고친 뒤 다시 실행하세요. `[warn]`은 무시해도 됩니다.
+`[FAIL]`이 있으면 그 줄의 안내대로 고친 뒤 다시 실행하세요. `[warn]`은 대개 무시해도 되지만,
+`conflict:`로 시작하는 경고는 [5절](#5-문제가-생기면)을 보고 처리하세요.
 
 **필요한 것:** Linux 또는 macOS, Python 3.9 이상, git, Codex CLI.
 설치는 셸 설정 파일이나 기존 Codex 설정(`~/.codex/config.toml`)을 바꾸지 않습니다.
+무엇이 설치될지 미리 보려면 `sh setup.sh --dry-run`을 실행하세요(아무것도 쓰지 않음).
 
 ## 2. 사용
 
@@ -111,6 +113,9 @@ als uninstall --global       # 전체 제거
 | als_worker · als_test_designer | GPT-6 Luna / Max | 구현 · 테스트 설계 |
 | als_hard_worker · als_reviewer_deep | GPT-6.1 Sol / High | 고난도 구현 · 고위험 검수 |
 | als_reviewer | GPT-6.1 Sol / Medium | 독립 검수 |
+
+모델과 추론 수준은 역할 파일이 고정합니다. 프롬프트에서 Medium 역할을 Max처럼 쓰라고 하지 말고,
+필요한 수준의 역할을 골라 맡기세요.
 
 ## 알아 둘 한계
 
