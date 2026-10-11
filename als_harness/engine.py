@@ -14,6 +14,12 @@ from . import efficiency
 
 # Attempt states that are already closed and must not be rewritten.
 ATTEMPT_FINAL = {'completed', 'failed', 'interrupted', 'cancelled'}
+# Task fields owned by the engine at runtime. A plan may only carry
+# 'executor', and only when a prepared efficiency block routes it.
+RUNTIME_TASK_KEYS = {'executor', 'claims_held', 'accepted_snapshot', 'attempts', 'status', 'result', 'run'}
+# High-risk retries may move to these roles; read-only kinds may also stay read-only.
+STRONG_RETRY_ROLES = {'als_hard_worker', 'als_reviewer_deep'}
+READ_ONLY_KINDS = {'exploration', 'research'}
 
 
 def validate_plan(plan):
@@ -46,6 +52,11 @@ def validate_plan(plan):
         if (not isinstance(criterion.get('description'), str) or not criterion['description']
                 or type(criterion['required']) is not bool):
             raise HarnessError('Criterion requires description and boolean required')
+    prepared = 'efficiency' in p
+    for task in p['tasks']:
+        forbidden = {k for k in RUNTIME_TASK_KEYS & task.keys() if not (k == 'executor' and prepared)}
+        if forbidden:
+            raise HarnessError('Runtime-only task fields are not plan input: ' + ', '.join(sorted(forbidden)))
     tasks = {t['id']: t for t in p['tasks']}
     checks = {c['id'] for c in p['checks']}
     for t in tasks.values():
@@ -447,8 +458,10 @@ class Engine:
             if role and role not in ROLES:
                 raise HarnessError('Unknown retry role')
             efficient = run['plan'].get('efficiency')
-            if efficient and role and task.get('risk') == 'high' and role not in {'als_hard_worker', 'als_reviewer_deep'}:
-                raise HarnessError('High-risk retry cannot be downgraded to a light role')
+            if efficient and role and task.get('risk') == 'high':
+                read_only_kind = task.get('kind') in READ_ONLY_KINDS and not ROLES[role][2]
+                if role not in STRONG_RETRY_ROLES and role != task['role'] and not read_only_kind:
+                    raise HarnessError('High-risk retry cannot be downgraded to a light role')
             if role and task['write_paths'] and not ROLES[role][2]:
                 raise HarnessError('Read-only retry cannot inherit write ownership')
             task['attempts'][-1]['next_approach'] = approach

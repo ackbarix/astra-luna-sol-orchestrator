@@ -12,7 +12,8 @@ import unittest
 from unittest.mock import patch
 from als_harness.state import Store, locate, evidence_root
 from als_harness import verify
-from als_harness.engine import Engine
+from als_harness.engine import Engine, validate_plan
+from als_harness import efficiency
 from als_harness.common import HarnessError, process_alive, process_start, redact, relative
 
 REPO = Path(__file__).resolve().parents[1]
@@ -451,6 +452,74 @@ class TaskCheckConcurrencyTests(EngineCase):
         self.e.reserve(rid, 'edit', 'c1')
         with self.assertRaises(HarnessError):
             verify.verify(self.e, rid, 'unit', execute_commands=True)
+
+
+def prepared_task(tid='scan', **kwargs):
+    item = {'id': tid, 'objective': 'Inspect module ' + tid, 'kind': 'exploration', 'complexity': 'bounded',
+            'risk': 'low', 'context_files': [], 'write_paths': [], 'resources': [], 'depends_on': [],
+            'checks': [], 'acceptance': ['Return evidence']}
+    item.update(kwargs)
+    return item
+
+
+def prepared_plan(tasks):
+    draft = {'goal': 'prepared', 'workload': 'bounded-fix', 'purpose': 'production', 'tasks': tasks,
+             'checks': [{'id': 'unit', 'argv': [sys.executable, '-c', 'print(1)']}], 'criteria': [],
+             'budget': {'tokens': 0, 'seconds': 0}}
+    return efficiency.prepare(draft)
+
+
+class PlanValidationTests(EngineCase):
+    def test_legacy_plan_rejects_runtime_keys(self):
+        for key, value in (('executor', 'head'), ('claims_held', True), ('accepted_snapshot', 'x'),
+                           ('attempts', []), ('status', 'completed'), ('result', {}), ('run', 'other')):
+            with self.subTest(key=key):
+                task = self.task()
+                task[key] = value
+                with self.assertRaises(HarnessError):
+                    validate_plan(self.plan([task]))
+
+    def test_head_executor_cannot_bypass_gates_in_legacy_plan(self):
+        task = self.task()
+        task['executor'] = 'head'
+        with self.assertRaises(HarnessError):
+            self.e.start(self.plan([task]))
+
+    def test_prepared_plan_keeps_executor_and_policy_keys(self):
+        plan = prepared_plan([prepared_task(complexity='trivial')])
+        plan['tasks'][0]['recommend_escalation'] = True
+        plan['efficiency']['caller_limits_capped'] = ['max_concurrent']
+        checked = validate_plan(plan)
+        self.assertEqual(checked['tasks'][0]['executor'], 'head')
+        self.assertTrue(checked['tasks'][0]['recommend_escalation'])
+        self.assertEqual(checked['efficiency']['caller_limits_capped'], ['max_concurrent'])
+        plan['tasks'][0]['claims_held'] = True
+        with self.assertRaises(HarnessError):
+            validate_plan(plan)
+
+
+class HighRiskRetryTests(EngineCase):
+    def failed_run(self, task):
+        rid = self.e.start(prepared_plan([task]))
+        self.assertTrue(self.e.reserve(rid, task['id'], 'c1')['allowed'])
+        self.e.finish(rid, task['id'], 'failed', failed=True, stopped=True)
+        return rid
+
+    def test_read_only_kinds_may_retry_on_read_only_roles(self):
+        for kind, role in (('exploration', 'als_explorer'), ('research', 'als_researcher')):
+            with self.subTest(kind=kind):
+                rid = self.failed_run(prepared_task('t' + kind[:3], kind=kind, risk='high'))
+                self.e.retry(rid, 't' + kind[:3], 'narrower read-only pass', role)
+                self.assertEqual(self.s.task(rid, 't' + kind[:3])['role'], role)
+                self.e.pause(rid, 'done', cancel=True)
+
+    def test_high_risk_write_task_cannot_be_downgraded(self):
+        rid = self.failed_run(prepared_task('impl', kind='implementation', risk='high', write_paths=['source.py']))
+        with self.assertRaises(HarnessError):
+            self.e.retry(rid, 'impl', 'cheaper worker', 'als_worker')
+        with self.assertRaises(HarnessError):
+            self.e.retry(rid, 'impl', 'read only', 'als_explorer')
+        self.e.retry(rid, 'impl', 'deep worker again', 'als_hard_worker')
 
 
 if __name__ == '__main__':
