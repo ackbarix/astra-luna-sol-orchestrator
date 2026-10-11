@@ -221,6 +221,17 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
             self.als(*args)
             self.assertFalse(marker.exists(), args)
 
+    def test_reinstall_without_custom_home_names_the_other_install(self):
+        custom = self.base / "custom als"
+        self.env['ALS_HOME'] = str(custom)
+        self.ok(self.glob())
+        del self.env['ALS_HOME']
+        result = self.glob()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        text = result.stdout + result.stderr
+        self.assertIn('ALS install at ' + str(custom), text)
+        self.assertNotIn('not managed by ALS', text)
+
     def test_als_run_without_profile_uses_plain_codex(self):
         self.ok(self.glob())
         (self.codex_home / 'als.config.toml').rename(self.base / 'saved')

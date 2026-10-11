@@ -488,6 +488,18 @@ def mode_drift(session: Session, files: dict[str, str]) -> list[str]:
     return out
 
 
+def foreign_als_home(content: bytes):
+    """ALS_HOME recorded in an installed `als` entrypoint, or None."""
+    for line in content.decode("utf-8", "replace").splitlines():
+        if line.startswith("ALS_DEFAULT_HOME="):
+            try:
+                words = shlex.split(line[len("ALS_DEFAULT_HOME="):])
+            except ValueError:
+                return None
+            return words[0] if len(words) == 1 and words[0] else None
+    return None
+
+
 def adopt_or_refuse(session: Session, desired: dict[str, bytes], owned: dict[str, str], manifestless: bool,
                     adopt: bool, adopt_cmd: str) -> list[str]:
     """New release paths that already exist: adopt exact copies, else refuse."""
@@ -508,8 +520,17 @@ def adopt_or_refuse(session: Session, desired: dict[str, bytes], owned: dict[str
             raise Refused("User-owned path already exists: " + key + " (a retained runtime ignore file that "
                           "differs from this release). Move your extra rules elsewhere, then delete it: rm "
                           + shlex.quote(str(session.layout.path(key))))
-        hint = (" It is identical to this release; take ownership with: " + adopt_cmd) if previous == data else \
-            " Move it aside (it is not managed by ALS) and rerun the installer."
+        other_home = foreign_als_home(previous)
+        if other_home is not None:
+            # An `als` entrypoint written by a global install under another
+            # ALS_HOME: name it instead of calling it "not managed by ALS".
+            hint = (" It is the `als` of the ALS install at " + other_home + "; rerun with ALS_HOME="
+                    + shlex.quote(other_home) + " to upgrade that install, or remove it first with:"
+                    + " ALS_HOME=" + shlex.quote(other_home) + " als uninstall --global")
+        elif previous == data:
+            hint = " It is identical to this release; take ownership with: " + adopt_cmd
+        else:
+            hint = " Move it aside (it is not managed by ALS) and rerun the installer."
         raise Refused("User-owned path already exists: " + session.layout.show(key) + "." + hint)
     return adopted
 
