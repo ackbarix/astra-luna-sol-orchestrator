@@ -149,7 +149,7 @@ doctor() {
   deps_out=$(PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe --json) || rc=$?
   harness_out=
   if [ -n "$harness_ok" ]; then
-   harness_out=$("$py" "$h" --project "$root" doctor) || rc=$?
+   harness_out=$("$py" "$h" --project "$root" doctor $probe) || rc=$?
   fi
   "$py" -c 'import json, sys
 def load(text):
@@ -163,7 +163,7 @@ print(json.dumps({"deps": load(sys.argv[1]), "harness": load(sys.argv[2])}, inde
  PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe || rc=$?
  if [ -n "$harness_ok" ]; then
   printf '\nHarness (%s):\n' "$root"
-  "$py" "$h" --project "$root" doctor --format text || rc=$?
+  "$py" "$h" --project "$root" doctor --format text $probe || rc=$?
  fi
  return "$rc"
 }

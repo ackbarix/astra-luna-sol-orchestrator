@@ -211,6 +211,16 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
         bad = self.als('doctor', '--bogus')
         self.assertEqual(bad.returncode, 2)
 
+    def test_doctor_no_probe_never_runs_codex_features(self):
+        self.ok(self.glob())
+        marker = self.base / 'features-called'
+        fake = self.base / 'fakebin' / 'codex'
+        fake.write_text('#!/bin/sh\ncase "$1" in\n --version) echo "codex-cli 9.9.9" ;;\n'
+                        ' features) touch "' + str(marker) + '"; printf "hooks stable true\\n" ;;\nesac\n')
+        for args in (('doctor', '--no-probe'), ('doctor', '--no-probe', '--json')):
+            self.als(*args)
+            self.assertFalse(marker.exists(), args)
+
     def test_als_run_without_profile_uses_plain_codex(self):
         self.ok(self.glob())
         (self.codex_home / 'als.config.toml').rename(self.base / 'saved')
