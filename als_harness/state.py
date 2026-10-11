@@ -21,6 +21,7 @@ CREATE INDEX IF NOT EXISTS events_by_run ON events(run,stamp);
 PRAGMA user_version=1;
 '''
 
+
 def locate(project: Path) -> Path:
     """Path of the state database for a project, without creating anything.
 
@@ -28,6 +29,7 @@ def locate(project: Path) -> Path:
     where evidence lives must use this instead of hardcoding paths.
     """
     return project.resolve() / '.astra-luna-sol/state/runs.sqlite'
+
 
 class Store:
     def __init__(self, project: Path):
@@ -95,7 +97,7 @@ class Store:
         return bool(cur.rowcount)
 
     def get(self, table, key, col='id'):
-        if (table,col) not in {('sessions','id'),('workers','id'),('cursors','path'),('events','key')}:
+        if (table, col) not in {('sessions', 'id'), ('workers', 'id'), ('cursors', 'path'), ('events', 'key')}:
             raise HarnessError('Unsupported state lookup')
         row = self.db.execute(f'SELECT doc FROM {table} WHERE {col}=?', (key,)).fetchone()
         return json.loads(row['doc']) if row else None
@@ -107,7 +109,7 @@ class Store:
         self.db.execute('INSERT INTO workers VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc', (wid, sid, encoded(data)))
 
     def for_session(self, sid):
-        matches = [r for r in self.runs() if r.get('session') == sid and r['status'] not in {'completed','cancelled'}]
+        matches = [r for r in self.runs() if r.get('session') == sid and r['status'] not in {'completed', 'cancelled'}]
         if len(matches) > 1:
             raise HarnessError('Ambiguous session/run association')
         return matches[0] if matches else None

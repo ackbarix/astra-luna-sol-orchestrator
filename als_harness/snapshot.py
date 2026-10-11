@@ -6,13 +6,16 @@ import stat
 import subprocess
 from .common import HarnessError, digest
 
-MAX_FILES, MAX_BYTES = 25000, 256 * 1024 * 1024
+MAX_FILES = 25000
+MAX_BYTES = 256 * 1024 * 1024
+
 
 def git(project, *args):
     r = subprocess.run(['git', '-C', str(project), *args], capture_output=True, timeout=15)
     if r.returncode:
         raise HarnessError('Git snapshot failed; use an initialized repository')
     return r.stdout
+
 
 def capture(project: Path):
     root = Path(os.fsdecode(git(project, 'rev-parse', '--show-toplevel').strip())).resolve()
@@ -35,9 +38,11 @@ def capture(project: Path):
         try:
             before = path.lstat()
         except FileNotFoundError:
-            records.append((rel, 'deleted')); continue
+            records.append((rel, 'deleted'))
+            continue
         if stat.S_ISLNK(before.st_mode):
-            records.append((rel, 'symlink', os.readlink(path))); continue
+            records.append((rel, 'symlink', os.readlink(path)))
+            continue
         if not stat.S_ISREG(before.st_mode):
             raise HarnessError('Unsupported snapshot path (submodule/special file): ' + rel)
         total += before.st_size
@@ -47,13 +52,13 @@ def capture(project: Path):
         with os.fdopen(fd, 'rb') as f:
             data = f.read(MAX_BYTES + 1)
             after = os.fstat(f.fileno())
-        if (before.st_ino,before.st_size,before.st_mtime_ns) != (after.st_ino,after.st_size,after.st_mtime_ns):
+        if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
             raise HarnessError('Code changed while fingerprinting; retry when stable')
         records.append((rel, stat.S_IMODE(before.st_mode), digest(data)))
-    head = subprocess.run(['git','-C',str(project),'rev-parse','--verify','HEAD'], capture_output=True, timeout=10)
-    branch = subprocess.run(['git','-C',str(project),'symbolic-ref','-q','HEAD'], capture_output=True, timeout=10)
-    state = {'head':head.stdout.decode().strip() if not head.returncode else 'unborn',
-             'branch':branch.stdout.decode().strip() if not branch.returncode else 'detached',
-             'files':records}
+    head = subprocess.run(['git', '-C', str(project), 'rev-parse', '--verify', 'HEAD'], capture_output=True, timeout=10)
+    branch = subprocess.run(['git', '-C', str(project), 'symbolic-ref', '-q', 'HEAD'], capture_output=True, timeout=10)
+    state = {'head': head.stdout.decode().strip() if not head.returncode else 'unborn',
+             'branch': branch.stdout.decode().strip() if not branch.returncode else 'detached',
+             'files': records}
     state['digest'] = digest(state)
     return state
