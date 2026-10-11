@@ -54,15 +54,22 @@ def inspect_config(project):
     return values, problems
 
 
-def verify_report(data):
-    """Validate recorded usage identity, NOT model self-description/upstream routing."""
+def verify_report(data, notes=None):
+    """Validate recorded usage identity, NOT model self-description/upstream routing.
+
+    Only the selected lineage's ``warnings`` count; ``index_warnings`` (unrelated
+    rollouts) and extra roles are appended to ``notes`` without failing the check.
+    """
+    notes = [] if notes is None else notes
     problems, observed = [], {}
     if data.get("schema_version") != 2 or data.get("scope") != "full_session":
         return {}, ["Use an ALS schema-v2 full-session JSON report (--root, not --day)"]
     for thread in data.get("threads", []):
+        if thread.get("counted") is False:
+            continue  # Guardian threads excluded from the report's totals.
         for row in thread.get("per_model_effort", []):
             if row.get("responses", 0) > 0:
-                observed.setdefault(thread.get("role"), set()).add((row.get("model"), row.get("effort")))
+                observed.setdefault(str(thread.get("role")), set()).add((row.get("model"), row.get("effort")))
     expected = {role: EXPECTED[role] for role in SMOKE_ROLES}
     expected["root"] = ("gpt-6-astra", "medium")
     for role, pair in expected.items():
@@ -70,8 +77,17 @@ def verify_report(data):
             problems.append("Missing recorded response identity: " + role + " / " + "/".join(pair))
         if observed.get(role, set()) - {pair}:
             problems.append("Unexpected recorded identity for role: " + role)
+    for role in sorted(set(observed) - set(expected)):
+        if role in EXPECTED and observed[role] - {EXPECTED[role]}:
+            problems.append("Unexpected recorded identity for role: " + role)
+        elif role in EXPECTED:
+            notes.append("Extra ALS role outside the smoke set: " + role)
+        else:
+            notes.append("Unexpected extra role (identity not verified): " + role)
     if data.get("warnings"):
         problems.append("Usage report contains incomplete/ambiguous evidence warnings")
+    if data.get("index_warnings"):
+        notes.append(f'{len(data["index_warnings"])} index warnings outside the selected lineage ignored')
     return {k: sorted(v) for k, v in observed.items()}, problems
 
 
@@ -135,9 +151,11 @@ def main(argv=None):
         output["runtime_probe"], warnings = probe()
         output["problems"].extend(warnings)
     if args.report:
-        recorded, warnings = verify_report(json.loads(args.report.read_text(encoding="utf-8")))
+        notes = []
+        recorded, problems = verify_report(json.loads(args.report.read_text(encoding="utf-8")), notes)
         output["recorded_worker_identities"] = recorded
-        output["problems"].extend(warnings)
+        output["problems"].extend(problems)
+        output["warnings"] = notes
     output["status"] = "CHECK_FAILED_OR_INCOMPLETE" if output["problems"] else "CONFIG_AND_REQUESTED_CHECKS_OK"
     output["note"] = "Config/record checks are not a model quality benchmark, completion proof, or upstream billing proof."
     print(json.dumps(output, indent=2, ensure_ascii=False))
