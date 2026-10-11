@@ -325,12 +325,17 @@ class VerificationLockTests(EngineCase):
     SLOW = [sys.executable, '-c', 'import time; time.sleep(60)']
 
     def spawn_verify(self, rid):
-        code = ('import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path;'
+        code = ('import sys, faulthandler, signal; faulthandler.register(signal.SIGUSR1, all_threads=True);'
+                'sys.path.insert(0, sys.argv[1]); from pathlib import Path;'
                 'from als_harness.state import Store; from als_harness.engine import Engine;'
                 'from als_harness import verify;'
                 'verify.verify(Engine(Store(Path(sys.argv[2]))), sys.argv[3], execute_commands=True)')
+        # stderr goes to a file so a stuck verify can dump its stack (SIGUSR1).
+        self.verify_err = Path(self.tmp.name) / ('verify-%s.err' % rid)
+        err = open(self.verify_err, 'wb')
+        self.addCleanup(err.close)
         proc = subprocess.Popen([sys.executable, '-c', code, str(REPO), str(self.project), rid],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.DEVNULL, stderr=err)
         self.addCleanup(self.reap, proc)
         # Generous deadline for loaded machines; polls, never a fixed sleep.
         deadline = time.monotonic() + 60
@@ -360,9 +365,15 @@ class VerificationLockTests(EngineCase):
             return
         raw = subprocess.run(['ps', '-o', 'pid=,ppid=,pgid=,stat=,lstart=,command=', '-p', str(pid)],
                              capture_output=True, text=True)
-        self.fail('check group leader %s still alive: process_info=%r recorded_start=%r ps=%r verify_rc=%r'
+        stack = ''
+        if verify_proc is not None and verify_proc.poll() is None:
+            os.kill(verify_proc.pid, signal.SIGUSR1)
+            time.sleep(1)
+            stack = self.verify_err.read_text(errors='replace')[-3000:]
+        self.fail('check group leader %s still alive: process_info=%r recorded_start=%r ps=%r verify_rc=%r\n'
+                  'verify stack:\n%s'
                   % (pid, process_info(pid), start, raw.stdout.strip(),
-                     verify_proc.poll() if verify_proc is not None else None))
+                     verify_proc.poll() if verify_proc is not None else None, stack))
 
     def test_lock_records_owner_and_check_group(self):
         rid = self.start(argv=self.SLOW)
