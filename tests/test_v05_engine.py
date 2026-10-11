@@ -494,6 +494,19 @@ class ProcessIdentityFallbackTests(unittest.TestCase):
             self.assertIsNone(common.process_info(4242))
             self.assertTrue(common.process_alive(4242))
 
+    def test_pid_recycled_by_another_user_is_not_alive(self):
+        """EPERM means the pid belongs to another user: ALS processes always run
+        as the current user, so the recorded one has exited."""
+        from als_harness import common
+
+        def no_proc(path):
+            raise FileNotFoundError(path)  # e.g. hidepid hides other users
+
+        with patch.object(Path, 'read_bytes', no_proc), \
+                patch.object(common.os, 'kill', side_effect=PermissionError(1, 'EPERM')):
+            self.assertFalse(common.process_alive(4242))
+            self.assertFalse(common.process_alive(4242, 5459))
+
 class TaskCheckConcurrencyTests(EngineCase):
     def test_task_check_runs_beside_read_only_and_other_run_writers(self):
         rid = self.start([self.task('scan', None, 'als_explorer'), self.task('edit')], session='s1')

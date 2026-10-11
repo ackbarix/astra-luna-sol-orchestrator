@@ -189,7 +189,14 @@ def process_start(pid):
 
 def process_alive(pid, start=None):
     """True when pid exists, is not a zombie and (when known) has the recorded
-    start time, i.e. the pid was not recycled by an unrelated process."""
+    start time, i.e. the pid was not recycled by an unrelated process.
+
+    Every pid ALS records (verify processes, check process groups) runs as the
+    current user, so EPERM from kill(pid, 0) proves the pid now belongs to
+    another user's process: ours has exited and the pid was recycled. That is
+    reported as not alive rather than "unknown" (on hardened /proc, e.g.
+    hidepid, another user's process is also unreadable, which used to be
+    treated as alive and kept dead lock owners live)."""
     if type(pid) is not int or pid <= 0:
         return False
     try:
@@ -197,7 +204,7 @@ def process_alive(pid, start=None):
     except ProcessLookupError:
         return False
     except PermissionError:
-        pass
+        return False
     info = process_info(pid)
     if info is None:
         return True
