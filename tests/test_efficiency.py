@@ -15,14 +15,6 @@ from als_harness.common import HarnessError, encoded
 from als_harness.state import Store
 
 
-def telemetry_reads_schema_2():
-    # TEMP(0.5 merge): report.py emits schema 2; remove once telemetry accepts it.
-    try:
-        a.metrics({'schema_version': 2, 'workers': []})
-        return True
-    except HarnessError:
-        return False
-
 ROOT=Path(__file__).resolve().parents[1]
 
 def task(tid='scan', **kwargs):
@@ -187,13 +179,11 @@ class EnginePolicyTests(EngineFixture, unittest.TestCase):
         with self.assertRaises(HarnessError):a.review_measurement(self.e,r,'bounded-fix','pass',True)
         with self.assertRaises(HarnessError):a.review_measurement(self.e,r,'bounded-fix','fail',False)
         self.assertTrue(a.review_measurement(self.e,r,'bounded-fix','fail',True)['recorded'])
-    @unittest.skipUnless(telemetry_reads_schema_2(), 'telemetry schema-2 support lands on the efficiency branch')
     def test_metrics_exact_subsets(self):
         r=self.start();self.event(r,n=454001,cached=432768);self.event(r,'kid',n=182619,cached=144896,model='gpt-6-luna')
         m=a.metrics(report.report(self.e,r));self.assertEqual(m['recorded_totals']['total_tokens'],636640)
         self.assertEqual(m['recorded_totals']['uncached_input_tokens'],58956)
         self.assertEqual(m['recorded_totals']['uncached_plus_output_tokens'],58976)
-    @unittest.skipUnless(telemetry_reads_schema_2(), 'telemetry schema-2 support lands on the efficiency branch')
     def test_no_history_no_gain_claim(self):
         r=self.start();self.assertFalse(a.history(self.s,'bounded-fix')['eligible'])
         self.assertFalse(a.metrics(report.report(self.e,r))['billing_verified'])
