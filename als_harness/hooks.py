@@ -10,11 +10,14 @@ from .common import ACTIVE, HarnessError, digest, ident, now
 from .engine import Engine
 from . import usage
 
+RECEIPT_REFRESH_SECONDS = 60
 EVENTS = {'SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd', 'Interrupt'}
 
 
 def spawn_name(name):
-    return isinstance(name, str) and name.rsplit('.', 1)[-1] in {'spawn_agent', 'Agent'}
+    """Bare `spawn_agent` or a namespaced `<ns>.spawn_agent`. The installed
+    matcher is `spawn_agent`, so no other tool name ever reaches the hook."""
+    return isinstance(name, str) and name.rsplit('.', 1)[-1] == 'spawn_agent'
 
 
 def context(event, message):
@@ -73,7 +76,10 @@ def linked_run(store, sid, agent):
 def record_receipt(store, sid, event, payload):
     """Session receipt; skips the write transaction when nothing would change."""
     receipt = store.get('sessions', sid)
-    if receipt is not None and event in receipt.get('seen', []) and event != 'SessionStart':
+    last = (receipt or {}).get('last_event')
+    if (receipt is not None and event in receipt.get('seen', []) and event != 'SessionStart'
+            and isinstance(last, (int, float)) and now() - last < RECEIPT_REFRESH_SECONDS):
+        # last_event (session auto-pick activity) stays fresh to within a minute.
         return receipt
     with store.tx():
         receipt = store.get('sessions', sid) or {'seen': [], 'transcripts': []}
@@ -141,8 +147,9 @@ def handle(store, payload):
     ident(sid)
     agent = child_agent(payload)
     cwd = Path(payload.get('cwd') or '').resolve()
-    if cwd != store.project and store.project not in cwd.parents:
-        # Forked-worktree children run outside the project; keep their lifecycle
+    if not store.belongs(cwd):
+        # The main checkout and every linked worktree of the same repository
+        # belong to this project. Children forked elsewhere keep their lifecycle
         # and spawn events only when the parent session maps to a run here.
         child_event = event in {'SubagentStart', 'SubagentStop'} or (
             event in {'PreToolUse', 'PostToolUse'} and agent is not None)
@@ -165,8 +172,9 @@ def handle(store, payload):
         if event == 'SessionStart':
             pending = [r['id'] for r in store.runs() if r['status'] not in {'completed', 'cancelled'}][:4]
             message = ('ALS harness available; session ' + sid + '. Do not create a run for trivial work. '
-                       + 'Register a plan with `' + cli_hint(store) + ' start --plan FILE --session ' + sid + '`'
-                       + ' for managed work. Pending runs: ' + (','.join(pending) or 'none'))
+                       + 'For managed work, prepare the draft plan with `' + cli_hint(store)
+                       + ' prepare --plan DRAFT > FILE`, then register it with `' + cli_hint(store)
+                       + ' start --plan FILE --session ' + sid + '`. Pending runs: ' + (','.join(pending) or 'none'))
             ended = session_end_runs(store)[:2]
             if ended:
                 # SessionEnd paused these for safety; reattaching stays an explicit user step.
@@ -190,6 +198,12 @@ def handle(store, payload):
                     store.save_run(r)
         return {}
     if event == 'SessionStart':
+        if run.get('session') == sid:
+            # A newly registered transcript of this run's session: skip its history.
+            anchors = usage.eof_anchors(store, sid)
+            if anchors:
+                with store.tx():
+                    usage.store_anchors(store, rid, anchors)
         message = ('ALS run ' + rid + ' is ' + run['status'] + '. Inspect `' + cli_hint(store) + ' status --run ' + rid
                    + '` before restarting any worker.'
                    + ' A resumed chat is not an automatic task replay.')

@@ -10,7 +10,7 @@ import uuid
 from .common import (ACTIVE, TERMINAL, ROLES, HarnessError, boot_id, checked_path, counted_tokens, digest, ident,
                      now, overlap, process_alive, process_start, relative)
 from .snapshot import capture
-from . import efficiency
+from . import efficiency, usage
 
 # Attempt states that are already closed and must not be rewritten.
 ATTEMPT_FINAL = {'completed', 'failed', 'interrupted', 'cancelled'}
@@ -20,6 +20,9 @@ RUNTIME_TASK_KEYS = {'executor', 'claims_held', 'accepted_snapshot', 'attempts',
 # High-risk retries may move to these roles; read-only kinds may also stay read-only.
 STRONG_RETRY_ROLES = {'als_hard_worker', 'als_reviewer_deep'}
 READ_ONLY_KINDS = {'exploration', 'research'}
+# Age limit for legacy verification locks without a recorded process start.
+LEGACY_LOCK_TIMEOUT = 3600
+LEGACY_LOCK_GRACE = 60
 
 
 def validate_plan(plan):
@@ -53,6 +56,9 @@ def validate_plan(plan):
                 or type(criterion['required']) is not bool):
             raise HarnessError('Criterion requires description and boolean required')
     prepared = 'efficiency' in p
+    if not prepared and any(isinstance(t, dict) and 'role' not in t for t in p['tasks']):
+        raise HarnessError('plan not prepared: run `als prepare --plan FILE > prepared.json`'
+                           ' then `als start --plan prepared.json`')
     for task in p['tasks']:
         forbidden = {k for k in RUNTIME_TASK_KEYS & task.keys() if not (k == 'executor' and prepared)}
         if forbidden:
@@ -112,13 +118,24 @@ class Engine:
     def __init__(self, store):
         self.s = store
 
-    def start(self, plan, session=None, mode='observe', ack=False):
+    def start(self, plan, session=None, mode='observe', ack=False, worktree=None):
+        """Register a run. `worktree` is the checkout the run works in (a
+        linked git worktree of this project, or the project itself); code
+        snapshots, checks and evidence freshness use it, while state stays
+        keyed by the main project."""
         p = validate_plan(plan)
         if mode not in ('observe', 'guarded'):
             raise HarnessError('Unknown mode')
         if session is not None:
             ident(session)
-        baseline = capture(self.s.project)
+        root = self.s.project
+        if worktree is not None:
+            root = self.s.worktree_of(worktree)
+            if root is None:
+                raise HarnessError('Worktree is not part of this project\'s repository: ' + str(worktree))
+        baseline = capture(root)
+        # HEAD transcripts already hold pre-run history: start their cursors at EOF.
+        anchors = usage.eof_anchors(self.s, session) if session else []
         with self.s.tx():
             if session and self.s.for_session(session):
                 raise HarnessError('Session already has an unfinished run')
@@ -131,11 +148,12 @@ class Engine:
             run = {'id': rid, 'goal': p['goal'], 'status': 'running', 'session': session, 'mode': mode,
                    'created': now(), 'baseline': baseline, 'plan': p, 'plan_hash': digest(p),
                    'completion_requested': False, 'stop_blocks': 0, 'evidence': {}, 'assessments': {},
-                   'warnings': [], 'verification': None}
+                   'warnings': [], 'verification': None, 'worktree': str(root)}
             self.s.save_run(run)
             for task in p['tasks']:
                 item = dict(task, run=rid, status='pending', attempts=[], result=None)
                 self.s.save_task(item)
+            usage.store_anchors(self.s, rid, anchors)
             self.s.event('start:' + rid, rid, 'run_started', {'mode': mode, 'requested_head': 'gpt-6-astra/medium'})
         return rid
 
@@ -144,6 +162,13 @@ class Engine:
         completed/cancelled runs can never release anything again."""
         closed = {r['id'] for r in self.s.runs() if r['status'] in TERMINAL}
         return [t for t in self.s.tasks() if t['run'] not in closed]
+
+    def root(self, run):
+        """Checkout the run works in (see Store.run_root)."""
+        return self.s.run_root(run)
+
+    def snapshot(self, rid):
+        return capture(self.root(self.s.run(rid)))
 
     # Verification lock -------------------------------------------------
     # run['verification'] = {'ticket', 'pid', 'pid_start', 'boot_id',
@@ -156,13 +181,27 @@ class Engine:
         return {'ticket': ticket, 'pid': pid, 'pid_start': process_start(pid), 'boot_id': boot_id(),
                 'started': now(), 'pgid': None, 'pgid_start': None, 'check': None}
 
-    def verification_live(self, lock):
+    def verification_live(self, lock, run=None):
         """A lock is live while its verify process exists with the recorded
         start time in the same boot. Missing pids, recycled pids and locks
-        from an earlier boot are stale."""
+        from an earlier boot are stale.
+
+        A legacy (0.4) lock has no pid_start, so a recycled pid would keep it
+        live forever: it is also stale once older than its check's timeout
+        (3600 s when the check is unknown) plus 60 s.
+        """
         current_boot = boot_id()
         if lock.get('boot_id') and current_boot and lock['boot_id'] != current_boot:
             return False
+        if lock.get('pid_start') is None:
+            timeout = LEGACY_LOCK_TIMEOUT
+            checks = (run or {}).get('plan', {}).get('checks', [])
+            for check in checks:
+                if check.get('id') == lock.get('check') and type(check.get('timeout')) is int:
+                    timeout = check['timeout']
+            started = lock.get('started')
+            if not isinstance(started, (int, float)) or now() - started > timeout + LEGACY_LOCK_GRACE:
+                return False
         return process_alive(lock.get('pid'), lock.get('pid_start'))
 
     def _kill_check_group(self, lock):
@@ -207,7 +246,7 @@ class Engine:
             if run['status'] in TERMINAL:
                 self.release_verification(run, 'run is ' + run['status'])
                 self.s.save_run(run)
-            elif self.verification_live(lock):
+            elif self.verification_live(lock, run):
                 live.append(run)
             else:
                 self.release_verification(run, 'verify process no longer running')
@@ -266,11 +305,12 @@ class Engine:
                 reasons.append('begin-head requires a task assigned to HEAD')
             if not as_head:
                 reasons.extend(efficiency.admission(run['plan'], task, self.s.tasks(rid), requested))
+            root = self.root(run)
             if run['plan'].get('efficiency'):
                 for path in task.get('context_files', []):
-                    checked_path(self.s.project, path)
+                    checked_path(root, path)
             for path in task['write_paths']:
-                checked_path(self.s.project, path)
+                checked_path(root, path)
             if run['status'] != 'running':
                 reasons.append('run is not running')
             if task['status'] != 'pending':
@@ -390,7 +430,7 @@ class Engine:
         """
         if not note or len(note) > 4000:
             raise HarnessError('A short evidence/result note is required')
-        snapshot, warning = self._try_capture()
+        snapshot, warning = self._try_capture(rid)
         with self.s.tx():
             run = self.s.run(rid)
             task = self.s.task(rid, tid)
@@ -415,7 +455,7 @@ class Engine:
             self.s.save_run(run)
 
     def accept(self, rid, tid):
-        snap = capture(self.s.project)['digest']
+        snap = self.snapshot(rid)['digest']
         with self.s.tx():
             run = self.s.run(rid)
             task = self.s.task(rid, tid)
@@ -476,7 +516,7 @@ class Engine:
             # No spawn or external action occurs here.
 
     def assess(self, rid, key, note, actor):
-        snap = capture(self.s.project)['digest']
+        snap = self.snapshot(rid)['digest']
         if not note or not actor:
             raise HarnessError('Assessment needs note and actor')
         with self.s.tx():
@@ -488,10 +528,10 @@ class Engine:
             self._observe(run, snap)
             self.s.save_run(run)
 
-    def _try_capture(self):
+    def _try_capture(self, rid):
         """(snapshot, None) or (None, warning) when the fingerprint fails."""
         try:
-            return capture(self.s.project), None
+            return self.snapshot(rid), None
         except (HarnessError, OSError, UnicodeError, subprocess.SubprocessError) as ex:
             return None, 'code snapshot unavailable (' + type(ex).__name__ + '): ' + str(ex)[:200]
 
@@ -535,7 +575,7 @@ class Engine:
         """Certify completion. A completed run is never downgraded: completing
         it again returns the recorded result for the same code, or an error
         when the code differs."""
-        snap = capture(self.s.project)['digest']
+        snap = self.snapshot(rid)['digest']
         with self.s.tx():
             self.live_verifications()
             run = self.s.run(rid)
@@ -599,7 +639,8 @@ class Engine:
         a live one needs --workers-stopped, which clears it and kills the
         recorded check group.
         """
-        snapshot = capture(self.s.project)
+        snapshot = self.snapshot(rid)
+        anchors = usage.eof_anchors(self.s, session) if session else []
         with self.s.tx():
             run = self.s.run(rid)
             if run['status'] == 'cancelled':
@@ -610,7 +651,7 @@ class Engine:
                 raise HarnessError('Worktree/HEAD differs: inspect changes, then --accept-drift')
             active = [t for t in self.s.tasks(rid) if t['status'] in ACTIVE]
             lock = run.get('verification')
-            if lock and not self.verification_live(lock):
+            if lock and not self.verification_live(lock, run):
                 self.release_verification(run, 'verify process no longer running')
             if (active or run.get('verification')) and not workers_stopped:
                 raise HarnessError('Confirm old workers/verification process stopped; no automatic duplicate dispatch')
@@ -620,6 +661,7 @@ class Engine:
                 if other and other['id'] != rid:
                     raise HarnessError('Session bound to another run')
                 run['session'] = session
+                usage.store_anchors(self.s, rid, anchors)
             if workers_stopped:
                 for task in active:
                     task['status'] = 'failed'

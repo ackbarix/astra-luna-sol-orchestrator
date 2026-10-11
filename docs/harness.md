@@ -13,8 +13,10 @@ Python/SQLite 하네스가 등록된 개발 작업의 상태·예약·검증·�
 | 프로젝트 | `als install PROJECT` 또는 `sh install.sh PROJECT` | `PROJECT/.astra-luna-sol/harness.py` | `PROJECT/.astra-luna-sol/state/runs.sqlite`, `PROJECT/.astra-luna-sol/evidence/` | `PROJECT/.codex/hooks.json` |
 
 `<hash>`는 메인 저장소 절대 경로의 SHA-256 앞 16자리입니다. `ALS_STATE_HOME`을 설정하면
-`<hash>` 디렉터리의 부모가 그 경로로 바뀝니다. 같은 저장소의 워크트리와 하위 디렉터리는
-모두 메인 저장소 하나로 매핑됩니다. 프로젝트 상태는 Git에서 무시되며 제거 후에도 남습니다.
+`<hash>` 디렉터리의 부모가 그 경로로 바뀝니다(절대 경로만 허용, 상대 경로는 오류). 상대 경로
+`XDG_STATE_HOME`은 XDG 규격대로 무시합니다. 같은 저장소의 워크트리와 하위 디렉터리는
+모두 메인 저장소 하나로 매핑됩니다. 상태 DB는 WAL 모드이며 명령은 5초, 훅은 2초까지 잠금을
+기다립니다. 프로젝트 상태는 Git에서 무시되며 제거 후에도 남습니다.
 
 훅 명령에는 프로젝트 절대 경로가 없습니다. 전역 훅은 `python3 "$HOME/.local/share/als/harness.py" hook`,
 프로젝트 훅은 `git rev-parse --git-common-dir`로 저장소를 찾습니다. PreToolUse/PostToolUse 그룹은
@@ -64,9 +66,17 @@ Observe에서도 `complete`는 실패한 검증을 성공으로 인증하지 않
 ```
 
 - `start --plan -`은 stdin에서 계획을 읽습니다.
-- `--session`을 생략하면 `CODEX_THREAD_ID`, 없으면 **최근 10분 안의 SessionStart 수신이 정확히 하나**일
-  때 그 세션을 씁니다. 여러 개이거나 없으면 추측하지 않습니다(observe는 세션 없이 경고와 함께
-  시작, guarded는 거부).
+- `--session`을 생략하면 `CODEX_THREAD_ID`, 없으면(observe만) **최근 10분 안에 훅 이벤트(종류
+  무관)가 있었던 세션이 정확히 하나**일 때 그 세션을 쓰고, 고른 세션 ID를 항상 경고로 출력합니다.
+  여러 개이거나 없으면 추측하지 않고 세션 없이 경고와 함께 시작합니다. guarded는 자동 선택하지
+  않으므로 `--session`이 필요합니다.
+- `prepare`를 거치지 않은 초안(`role` 없는 task, `efficiency` 없음)은 `plan not prepared` 오류와 함께
+  `als prepare --plan FILE > prepared.json` 후 `als start --plan prepared.json`을 안내합니다.
+- **워크트리:** `git worktree`로 만든 연결 워크트리 안에서 `start`하면 상태는 메인 저장소 기준으로
+  저장되지만, run은 그 워크트리(`run.worktree`)에서 작업합니다. 코드 fingerprint, `verify`의 실행
+  위치(cwd), 증거 최신성은 그 워크트리 기준이므로 메인 체크아웃의 변경은 이 run의 증거를 무효화하지
+  않습니다. 같은 저장소의 어느 워크트리에서 온 훅 이벤트(SessionStart, PreToolUse, Stop 등)도
+  처리합니다. 0.5.0 이전 run(필드 없음)은 메인 저장소를 씁니다.
 - 계획에는 런타임 전용 task 키(상태·시도 기록 등)를 넣을 수 없습니다. `.git`, `.astra-luna-sol`,
   `.codex` 아래는 작업 소유 경로로 예약되어 있습니다.
 - `0` 예산은 미설정입니다. 토큰 예산은 **비캐시 입력 + 출력** 기준 소프트 예산이며 청구액이 아닙니다.
@@ -131,7 +141,8 @@ als complete --run RUN_ID
 - **전역 검증 잠금:** 한 번에 하나의 verify만 워크트리를 소유합니다. 잠금에는 verify 프로세스
   PID·시작 시각·부팅 ID와 실행 중인 검사의 프로세스 그룹이 기록됩니다. 프로세스가 사라졌거나
   PID가 재사용됐거나 재부팅된 잠금은 **stale**로 판단해 다음 verify/complete/resume 때 자동 해제하고
-  `verification_lock_cleared` 이벤트를 남깁니다.
+  `verification_lock_cleared` 이벤트를 남깁니다. 시작 시각이 없는 0.4 잠금은 검사 timeout(모르면
+  3600초)+60초가 지나면 stale입니다. 검사 프로세스 그룹은 리더를 회수하기 전에 종료합니다.
 - verify가 도는 중 run이 pause/cancel되면 그 결과는 증거로 채택되지 않습니다.
 - **최종 검사**(`--check` 없음): 어떤 미완료 run에도 활성 워커나 쓰기 claim이 없어야 합니다.
 - **task 검사**(`--check ID`): **이 run**이 쓰기 claim을 갖고 있지 않으면 됩니다. 다른 run의 작성자나
@@ -160,7 +171,10 @@ als usage --latest
 ```
 
 등록된 root/child 세션 로그만 증분으로 읽습니다(기본 `$CODEX_HOME/sessions`, run에 기록된 세션
-경로 기준). 너무 큰 로그 줄은 건너뛰고 경고하며, 잘린 로그를 감지합니다. 아직 연결되지 않은
+경로 기준). HEAD 세션 로그는 `start`, `resume --session`, 이미 run이 있는 세션의 SessionStart 시점의
+마지막 완전한 줄에서 읽기 시작하므로 이전 대화 기록에 읽기 예산을 쓰지 않습니다(이미 있는 커서는
+옮기지 않음). 호출당 읽기 예산은 가장 오래 동기화되지 않은 로그부터 돌아가며 써서 워커 로그가
+밀리지 않습니다. 너무 큰 로그 줄은 건너뛰고 경고하며, 잘린 로그를 감지합니다. 아직 연결되지 않은
 스레드의 사용량도 버리지 않습니다. 로그가 없으면 미측정이지 0이 아닙니다.
 70%는 경고, 90%는 새 작업 직렬화, 100%는 신규 예약 거절입니다. 진행 중 응답·다른 세션·청구
 요금은 즉시 제한하지 못합니다.
@@ -171,7 +185,7 @@ als usage --latest
 |---|---|
 | `install.sh` / `als install --check` | 0 정상, 1 미설치, 2 변경·거부, 4 구버전 |
 | `install.sh` / `als install` (그 외) | 0 성공, 2 거부(사전 점검 실패·수정된 관리 파일 등) |
-| `als doctor` | 필수 의존성이 없으면 1(필수 항목 `FAIL`), 선택 항목은 `warn`만 |
+| `als doctor` / `harness.py doctor` | 필수 의존성이 없으면 1(필수 항목 `FAIL`), 선택 항목과 훅 미설치는 `warn`만(0) |
 | `token_usage.py` / `als usage` | 0 정상, 1 해당 세션 없음, 2 인자·세션 디렉터리 오류, 3 `--strict`에서 경고 |
 | `check-runtime.py` | 0 정상, 2 문제 발견 |
 
@@ -192,6 +206,9 @@ als usage --latest
 | `conflict:versions` (선택) | 프로젝트·전역 버전 불일치. 오래된 쪽을 `als install` 또는 `als install --global`로 재설치 |
 
 하네스 부분은 범위(project/global), 상태 DB 경로, 훅 파일 구성 여부와 관측된 이벤트를 보여줍니다.
+두 범위 모두 `PROJECT/.codex/hooks.json`(프로젝트·`--hooks-only` 설치)을 먼저, 이어서
+`$CODEX_HOME/hooks.json`(전역 설치)을 확인하고 훅을 찾은 파일을 표시합니다(`hooks_found_in`).
+`--no-probe`는 의존성 점검에서 외부 프로브를 생략합니다.
 configured(설정 존재), observed(콜백 도착), trust(사용자 신뢰), blocking(차단 실효성)은 서로 다르며,
 콜백을 봤다고 서빙 모델이나 보안 경계가 검증된 것은 아닙니다.
 
