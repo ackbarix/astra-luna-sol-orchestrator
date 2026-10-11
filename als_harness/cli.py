@@ -85,8 +85,8 @@ def state_path(project, scope):
     return state.locate(project, scope=scope)
 
 
-def open_store(project, scope):
-    return Store(project, scope=scope)
+def open_store(project, scope, hook=False):
+    return Store(project, scope=scope, busy_ms=state.HOOK_BUSY_MS if hook else state.CLI_BUSY_MS)
 
 
 def default_session(store, mode):
@@ -486,7 +486,7 @@ def main(argv=None):
                 out = {'runs': [], 'note': 'No managed runs registered', 'next': 'harness.py start --plan <plan.json>'}
             emit(args, out)
             return 0
-        store = open_store(project, args.scope)
+        store = open_store(project, args.scope, hook=args.cmd == 'hook')
         if args.cmd == 'hook':
             out = hooks.handle(store, payload)
             code = 0

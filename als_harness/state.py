@@ -27,6 +27,9 @@ SCOPES = ('project', 'global')
 PROJECT_STATE = '.astra-luna-sol/state'
 PROJECT_EVIDENCE = '.astra-luna-sol/evidence'
 DB_NAME = 'runs.sqlite'
+# CLI commands may wait longer for a concurrent writer; hooks must stay fast.
+CLI_BUSY_MS = 5000
+HOOK_BUSY_MS = 2000
 
 
 def _scope(scope):
@@ -36,12 +39,24 @@ def _scope(scope):
 
 
 def global_base() -> Path:
-    """$ALS_STATE_HOME, else ${XDG_STATE_HOME:-~/.local/state}/als."""
+    """$ALS_STATE_HOME, else ${XDG_STATE_HOME:-~/.local/state}/als; always absolute.
+
+    A relative ALS_STATE_HOME is refused (it would move with the current
+    directory, splitting state between commands and hooks). A relative
+    XDG_STATE_HOME is ignored, as the XDG Base Directory spec requires.
+    """
     explicit = os.environ.get('ALS_STATE_HOME')
     if explicit:
-        return Path(explicit).expanduser()
+        path = Path(explicit).expanduser()
+        if not path.is_absolute():
+            raise HarnessError('ALS_STATE_HOME must be an absolute path (got a relative path: '
+                               + explicit[:200] + ')')
+        return path
     xdg = os.environ.get('XDG_STATE_HOME')
-    return (Path(xdg).expanduser() if xdg else Path.home() / '.local/state') / 'als'
+    base = Path(xdg).expanduser() if xdg else None
+    if base is None or not base.is_absolute():
+        base = Path.home() / '.local/state'
+    return base / 'als'
 
 
 def state_dir(project: Path, scope: str = 'project') -> Path:
@@ -71,7 +86,7 @@ def evidence_root(project: Path, scope: str = 'project') -> Path:
 
 
 class Store:
-    def __init__(self, project: Path, scope: str = 'project'):
+    def __init__(self, project: Path, scope: str = 'project', busy_ms: int = CLI_BUSY_MS):
         self.project = project.resolve(strict=True)
         self.scope = _scope(scope)
         if self.scope == 'project':
@@ -92,9 +107,16 @@ class Store:
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         os.close(fd)
         os.chmod(self.path, 0o600)
-        self.db = sqlite3.connect(self.path, timeout=1.5, isolation_level=None)
+        self.db = sqlite3.connect(self.path, timeout=busy_ms / 1000, isolation_level=None)
         self.db.row_factory = sqlite3.Row
-        self.db.execute('PRAGMA busy_timeout=1500')
+        self.db.execute('PRAGMA busy_timeout=%d' % int(busy_ms))
+        try:
+            # WAL: readers never block the writer (verify subprocesses, hooks
+            # and the CLI share this file). Persistent once set; if another
+            # process holds a lock right now, keep the current mode.
+            self.db.execute('PRAGMA journal_mode=WAL')
+        except sqlite3.OperationalError:
+            pass
         v = self.db.execute('PRAGMA user_version').fetchone()[0]
         if v not in (0, 1):
             self.db.close()

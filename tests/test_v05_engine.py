@@ -324,11 +324,14 @@ class VerificationLockTests(EngineCase):
         proc = subprocess.Popen([sys.executable, '-c', code, str(REPO), str(self.project), rid],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(self.reap, proc)
-        deadline = time.monotonic() + 20
+        # Generous deadline for loaded machines; polls, never a fixed sleep.
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             lock = self.s.run(rid).get('verification') or {}
             if lock.get('pgid'):
                 return proc, lock
+            if proc.poll() is not None:
+                self.fail('verify exited (%s) before recording its check process group' % proc.returncode)
             time.sleep(.05)
         self.fail('verify never recorded its check process group')
 
@@ -338,7 +341,7 @@ class VerificationLockTests(EngineCase):
         proc.wait()
 
     def wait_dead(self, pid, start):
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 30
         while process_alive(pid, start) and time.monotonic() < deadline:
             time.sleep(.05)
         return not process_alive(pid, start)
@@ -374,7 +377,7 @@ class VerificationLockTests(EngineCase):
                 self.e.pause(rid, 'operator stop', cancel=cancel)
                 self.assertIsNone(self.s.run(rid)['verification'])
                 self.assertTrue(self.wait_dead(lock['pgid'], lock['pgid_start']))
-                proc.wait(timeout=20)
+                proc.wait(timeout=60)
                 self.assertEqual(self.s.run(rid)['evidence'], {})
 
     def test_resume_requires_ack_for_live_lock_then_clears_it(self):
@@ -385,7 +388,7 @@ class VerificationLockTests(EngineCase):
         self.e.resume(rid, workers_stopped=True)
         self.assertIsNone(self.s.run(rid)['verification'])
         self.assertTrue(self.wait_dead(lock['pgid'], lock['pgid_start']))
-        proc.wait(timeout=20)
+        proc.wait(timeout=60)
         self.assertEqual(self.s.run(rid)['evidence'], {})
 
     def test_recycled_pid_lock_is_stale_and_foreign_group_is_never_killed(self):
