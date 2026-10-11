@@ -116,7 +116,9 @@ class CliScopeTests(unittest.TestCase):
         status = subprocess.run([sys.executable, str(home / 'harness.py'), 'doctor'], capture_output=True, text=True,
                                 cwd=str(fork))
         self.assertEqual(json.loads(status.stdout)['scope'], 'project')
-        self.assertEqual(json.loads(status.stdout)['state_path'], str(home / 'state/runs.sqlite'))
+        # Compare resolved paths: macOS temp dirs live under /var -> /private/var.
+        self.assertEqual(os.path.realpath(json.loads(status.stdout)['state_path']),
+                         os.path.realpath(str(home / 'state/runs.sqlite')))
 
     def test_global_hook_resolves_project_from_payload_cwd(self):
         (self.project / 'sub').mkdir()

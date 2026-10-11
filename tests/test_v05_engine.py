@@ -19,6 +19,14 @@ from als_harness.common import HarnessError, process_alive, process_start, redac
 REPO = Path(__file__).resolve().parents[1]
 
 
+
+def recycled(start):
+    """A start time that differs from the real one, in its platform form:
+    Linux gives integer clock ticks, macOS a `ps -o lstart=` string."""
+    if isinstance(start, int):
+        return start + 1
+    return (start or '') + ' (recycled)'
+
 class EngineCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -398,9 +406,9 @@ class VerificationLockTests(EngineCase):
         me = os.getpid()
         with self.s.tx():
             run = self.s.run(rid)
-            run['verification'] = {'ticket': 'forged', 'pid': me, 'pid_start': (process_start(me) or 0) + 1,
+            run['verification'] = {'ticket': 'forged', 'pid': me, 'pid_start': recycled(process_start(me)),
                                    'boot_id': None, 'started': 0, 'pgid': bystander.pid,
-                                   'pgid_start': (process_start(bystander.pid) or 0) + 1, 'check': 'unit'}
+                                   'pgid_start': recycled(process_start(bystander.pid)), 'check': 'unit'}
             self.s.save_run(run)
         self.assertTrue(verify.verify(self.e, rid, execute_commands=True)['passed'])
         self.assertIsNone(bystander.poll())

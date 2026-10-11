@@ -1,5 +1,6 @@
 """Snapshot robustness regressions (0.5.0 audit): nested repos, gitlinks,
 non-UTF-8 names and special files must not disable the harness."""
+import errno
 import os
 from pathlib import Path
 import subprocess
@@ -18,6 +19,19 @@ GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.inva
 def git(*args):
     return subprocess.run(['git', *args], check=True, capture_output=True, env=GIT_ENV).stdout.decode().strip()
 
+
+
+def write_raw_name(raw, data):
+    """Create a file with a raw (possibly non-UTF-8) name; False when the
+    filesystem refuses such names (APFS raises EILSEQ)."""
+    try:
+        with open(raw, 'wb') as handle:
+            handle.write(data)
+    except OSError as error:
+        if error.errno == errno.EILSEQ:
+            return False
+        raise
+    return True
 
 class SnapshotRobustnessTests(unittest.TestCase):
     def setUp(self):
@@ -65,8 +79,8 @@ class SnapshotRobustnessTests(unittest.TestCase):
 
     def test_non_utf8_filename(self):
         raw = os.path.join(os.fsencode(self.project), b'bad\xff.txt')
-        with open(raw, 'wb') as handle:
-            handle.write(b'payload')
+        if not write_raw_name(raw, b'payload'):
+            self.skipTest('filesystem rejects non-UTF-8 names (e.g. APFS)')
         state = capture(self.project)
         self.assertEqual(len(self.entry(state, 'hex:' + b'bad\xff.txt'.hex())), 1)
         self.assertEqual(len(self.entry(state, 'source.py')), 1)
@@ -89,8 +103,8 @@ class SnapshotRobustnessTests(unittest.TestCase):
 
     def test_lifecycle_works_with_nested_repo_and_odd_names(self):
         self.nested_repo()
-        with open(os.path.join(os.fsencode(self.project), b'odd\xfe'), 'wb') as handle:
-            handle.write(b'1')
+        # Optional on filesystems that reject non-UTF-8 names; the nested repo still applies.
+        write_raw_name(os.path.join(os.fsencode(self.project), b'odd\xfe'), b'1')
         store = Store(self.project)
         try:
             engine = Engine(store)
