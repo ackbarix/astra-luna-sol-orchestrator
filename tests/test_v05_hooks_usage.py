@@ -190,6 +190,16 @@ class UsageAuditTests(unittest.TestCase):
         synced = self.s.run(r)['last_usage_sync']
         self.assertEqual(report.report(self.e, r)['budget']['usage_synced_at'], synced)
 
+    # Item 9
+    def test_report_schema_2_keeps_keys(self):
+        r = self.e.start({'goal': 'usage'}, 'sid')
+        data = report.report(self.e, r)
+        self.assertEqual(data['schema_version'], 2)
+        for key in ('run', 'goal', 'status', 'mode', 'session', 'workers', 'checks', 'budget',
+                    'usage_by_thread_model_effort', 'efficiency', 'measurement', 'purpose', 'last_usage_sync',
+                    'closed_at', 'warnings', 'completion_problems', 'billing_verified', 'note'):
+            self.assertIn(key, data)
+
 
 if __name__ == '__main__':
     unittest.main()

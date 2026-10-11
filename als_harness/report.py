@@ -21,7 +21,7 @@ def report(engine, rid):
         u['responses'] += 1
         for k in USAGE_FIELDS:
             u[k] += e['usage'][k]
-    return {'schema_version': 1, 'run': rid, 'goal': redact(r['goal']), 'status': r['status'], 'mode': r['mode'],
+    return {'schema_version': 2, 'run': rid, 'goal': redact(r['goal']), 'status': r['status'], 'mode': r['mode'],
             'session': r.get('session'),
             'head_requested': ['gpt-6-astra', 'medium'],
             'workers': [{k: t.get(k) for k in WORKER_FIELDS} for t in tasks],
