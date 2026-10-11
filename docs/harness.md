@@ -178,6 +178,16 @@ fingerprint는 추적되지 않는 `__pycache__/`와 `*.pyc`/`*.pyo` 파일을 �
   PID가 재사용됐거나 재부팅된 잠금은 **stale**로 판단해 다음 verify/complete/resume 때 자동 해제하고
   `verification_lock_cleared` 이벤트를 남깁니다. 시작 시각이 없는 0.4 잠금은 검사 timeout(모르면
   3600초)+60초가 지나면 stale입니다. 검사 프로세스 그룹은 리더를 회수하기 전에 종료합니다.
+- **생존 판정은 안전한 쪽으로:** 잠금에는 verify의 uid도 기록됩니다. 프로세스 상태를 확인할 수
+  없으면(Codex Seatbelt 샌드박스가 신호·`ps`를 막는 경우, 다른 uid로 실행된 경우 등) 잠금을
+  **살아 있는 것으로 유지**합니다. 살아 있는 verify의 잠금을 잘못 해제하지 않기 위해서입니다.
+  죽은 것이 확실한 경우만 stale로 봅니다: pid 없음, 시작 시각 불일치, 좀비(macOS의 `ps`에서 빠진
+  좀비 포함), Linux에서 같은 uid로 기록된 pid가 다른 사용자 프로세스로 재사용된 경우. 판정할 수
+  없어 남은 잠금은 `resume --workers-stopped`나 `cancel`로 해제합니다.
+- **SIGKILL은 신원이 확인될 때만:** 검사 프로세스 그룹은 그 리더의 상태를 읽을 수 있고 기록된
+  시작 시각과 같으며 좀비가 아닐 때만 종료합니다. 확인할 수 없으면 잠금은 해제하되 신호는 보내지
+  않습니다(`check_group_killed: false`). 이때도 verify 프로세스가 살아 있으면 검사는 자체
+  timeout으로 끝납니다.
 - verify가 도는 중 run이 pause/cancel되면 그 결과는 증거로 채택되지 않습니다.
 - **최종 검사**(`--check` 없음): 같은 워크트리의 어떤 미완료 run에도 활성 워커나 쓰기 claim이 없어야 합니다.
 - **task 검사**(`--check ID`): **이 run**이 쓰기 claim을 갖고 있지 않으면 됩니다. 다른 run의 작성자나

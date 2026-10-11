@@ -120,6 +120,20 @@
 - Fingerprints exclude untracked `__pycache__/` and `*.pyc` files, and checks run with
   `PYTHONDONTWRITEBYTECODE=1`.
 
+### Rounds 5–11 (audit convergence and CI)
+- Live runs whose linked worktree was moved or removed keep their claims counting in every
+  worktree until cancelled, so `git worktree move` cannot bypass file exclusivity.
+- Process liveness is fail-safe: verification locks record the owner's uid; an owner that
+  cannot be inspected (Codex Seatbelt sandbox, another uid) keeps the lock. A pid missing
+  from macOS `ps` counts as exited only when it is still signalable (a zombie); on Linux a
+  same-uid owner whose pid now belongs to another user is stale. SIGKILL of a check group
+  needs positive identity (readable, same start, not a zombie).
+- Installer remedies carry a non-default `ALS_HOME`; a reinstall blocked by another ALS
+  install's `als` names that install, and this install's own `als` suggests `--adopt`.
+- The test suite is hermetic: no host `codex`/`ocx` is executed, inherited `ALS_*` and
+  `CODEX_THREAD_ID` are ignored, and it passes on Linux and macOS (Python 3.9 runtime job,
+  3.11 and 3.14).
+
 ### Round-3 and round-4 installer and `als` fixes
 - Upgrading a 0.2/0.4 project install records the ALS directories it created, so a later
   uninstall removes them when empty; `[features] hooks = true` is no longer mistaken for
