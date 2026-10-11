@@ -66,7 +66,7 @@ def verify(engine, rid, check_id=None, execute_commands=False):
         run = s.run(rid)
         if run['status'] != 'running':
             raise HarnessError('Verification requires running run')
-        if any(t['status'] in ACTIVE or (t['write_paths'] and t.get('claims_held')) for t in s.tasks()):
+        if any(t['status'] in ACTIVE or (t['write_paths'] and t.get('claims_held')) for t in engine.live_tasks()):
             raise HarnessError('Stop/finish active workers and release write claims before final checks')
         if any(x.get('verification') for x in s.runs()):
             raise HarnessError('Another verification owns the worktree')

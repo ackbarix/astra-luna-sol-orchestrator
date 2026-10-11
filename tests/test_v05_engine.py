@@ -170,5 +170,143 @@ class EvidencePathTests(EngineCase):
         self.assertFalse(self.e.evidence_valid(record, snap))
 
 
+class LifecycleTests(EngineCase):
+    def stopped_worker(self, rid, tid, call, thread):
+        self.assertTrue(self.e.reserve(rid, tid, call)['allowed'])
+        self.e.bind(rid, call, thread)
+        self.e.worker_stopped('sid', thread, 'als_worker')
+        self.assertEqual(self.s.task(rid, tid)['status'], 'awaiting_validation')
+
+    def test_cancel_releases_claims_for_later_runs(self):
+        first = self.start([self.task('a'), self.task('b', 'other.py')], session='s1')
+        self.e.reserve(first, 'a', 'ca')
+        self.stopped_worker(first, 'b', 'cb', 'thread-b')
+        self.assertTrue(self.s.task(first, 'b')['claims_held'])
+        self.e.pause(first, 'stop it', cancel=True)
+        for key in ('a', 'b'):
+            task = self.s.task(first, key)
+            self.assertEqual(task['status'], 'cancelled')
+            self.assertFalse(task['claims_held'])
+            self.assertEqual(task['attempts'][-1]['status'], 'cancelled')
+        second = self.start([self.task('a'), self.task('b', 'other.py')], session='s2')
+        self.assertTrue(self.e.reserve(second, 'a', 'c2a')['allowed'])
+        self.assertTrue(self.e.reserve(second, 'b', 'c2b')['allowed'])
+
+    def test_stale_claims_of_terminal_runs_are_ignored(self):
+        first = self.start([self.task('a')], session='s1')
+        self.e.reserve(first, 'a', 'ca')
+        with self.s.tx():
+            run = self.s.run(first)
+            run['status'] = 'cancelled'
+            self.s.save_run(run)
+        second = self.start([self.task('a')], session='s2')
+        self.assertTrue(verify.verify(self.e, second, execute_commands=True)['passed'])
+        self.assertTrue(self.e.reserve(second, 'a', 'c2')['allowed'])
+
+    def test_resume_keeps_finished_work_awaiting_validation(self):
+        rid = self.start([self.task('done'), self.task('busy', 'other.py')])
+        self.stopped_worker(rid, 'done', 'c1', 'thread-1')
+        self.e.reserve(rid, 'busy', 'c2')
+        self.e.pause(rid, 'interrupted')
+        with self.assertRaises(HarnessError):
+            self.e.resume(rid)
+        self.e.resume(rid, workers_stopped=True)
+        self.assertEqual(self.s.task(rid, 'done')['status'], 'awaiting_validation')
+        self.assertEqual(self.s.task(rid, 'busy')['status'], 'failed')
+        self.assertEqual(self.s.task(rid, 'busy')['attempts'][-1]['status'], 'interrupted')
+        self.e.finish(rid, 'done', 'worker result')
+        self.e.accept(rid, 'done')
+        self.assertEqual(self.s.task(rid, 'done')['status'], 'completed')
+
+    def test_resume_without_flag_when_only_stopped_workers_hold_claims(self):
+        rid = self.start([self.task('done')])
+        self.stopped_worker(rid, 'done', 'c1', 'thread-1')
+        self.e.pause(rid, 'break')
+        self.assertTrue(self.e.resume(rid)['resumed'])
+        self.assertEqual(self.s.task(rid, 'done')['status'], 'awaiting_validation')
+
+    def test_snapshot_observed_by_finish_accept_assess_complete(self):
+        plan = self.plan([self.task('one')])
+        plan['criteria'] = [{'id': 'crit', 'description': 'reviewed'}]
+        rid = self.e.start(plan)
+        steps = [
+            lambda: (self.e.reserve(rid, 'one', 'c1'), self.e.finish(rid, 'one', 'note', stopped=True)),
+            lambda: self.e.accept(rid, 'one'),
+            lambda: self.e.assess(rid, 'crit', 'looks fine', 'head'),
+            lambda: self.e.complete(rid),
+        ]
+        for number, step in enumerate(steps):
+            with self.subTest(step=number):
+                (self.project / 'source.py').write_text('x=' + str(number + 10) + '\n')
+                step()
+                self.e.pause(rid, 'checkpoint')
+                self.e.resume(rid)
+        self.assertNotIn('checkpoint', self.s.run(rid))
+
+    def test_retry_clears_result_and_accept_requires_new_finish(self):
+        rid = self.start([self.task('one')])
+        self.e.reserve(rid, 'one', 'c1')
+        self.e.finish(rid, 'one', 'broken', failed=True, stopped=True)
+        self.e.retry(rid, 'one', 'different approach')
+        self.assertIsNone(self.s.task(rid, 'one')['result'])
+        self.stopped_worker(rid, 'one', 'c2', 'thread-2')
+        with self.assertRaises(HarnessError):
+            self.e.accept(rid, 'one')
+        with self.s.tx():
+            task = self.s.task(rid, 'one')
+            task['result'] = {'note': 'stale', 'snapshot': None, 'basis': 'caller_reported', 'stamp': 1.0}
+            self.s.save_task(task)
+        with self.assertRaises(HarnessError):
+            self.e.accept(rid, 'one')
+        self.e.finish(rid, 'one', 'fixed')
+        self.e.accept(rid, 'one')
+        self.assertEqual(self.s.task(rid, 'one')['status'], 'completed')
+
+    def test_completed_run_is_never_downgraded(self):
+        rid = self.start(session='sid')
+        self.assertTrue(verify.verify(self.e, rid, execute_commands=True)['passed'])
+        self.assertTrue(self.e.complete(rid)['completed'])
+        log = self.s.evidence_path(self.s.run(rid)['evidence']['unit']['log_path'])
+        log.unlink()
+        again = self.e.complete(rid)
+        self.assertTrue(again['completed'])
+        self.assertTrue(again['already_completed'])
+        self.assertEqual(self.s.run(rid)['status'], 'completed')
+        self.assertIsNone(self.s.for_session('sid'))
+        other = self.start(session='sid')
+        self.assertEqual(self.s.for_session('sid')['id'], other)
+        (self.project / 'source.py').write_text('changed\n')
+        with self.assertRaises(HarnessError):
+            self.e.complete(rid)
+        self.assertEqual(self.s.run(rid)['status'], 'completed')
+
+    def test_bind_after_pause_keeps_task_uncertain(self):
+        rid = self.start([self.task('one')])
+        self.e.reserve(rid, 'one', 'c1')
+        self.e.pause(rid, 'interrupted')
+        result = self.e.bind(rid, 'c1', 'thread-1')
+        task = self.s.task(rid, 'one')
+        self.assertEqual(task['status'], 'uncertain')
+        self.assertEqual(task['attempts'][-1]['thread_id'], 'thread-1')
+        self.assertTrue(result['bound'])
+
+    def test_claim_release_survives_snapshot_failure(self):
+        rid = self.start([self.task('one'), self.task('two', 'other.py')])
+        self.e.reserve(rid, 'one', 'c1')
+        self.e.reserve(rid, 'two', 'c2')
+        with patch('als_harness.engine.capture', side_effect=HarnessError('Git snapshot failed')):
+            self.e.finish(rid, 'one', 'crashed', failed=True, stopped=True)
+            task = self.s.task(rid, 'one')
+            self.assertEqual(task['status'], 'failed')
+            self.assertFalse(task['claims_held'])
+            self.assertIsNone(task['result']['snapshot'])
+            self.assertTrue(any('snapshot unavailable' in w for w in self.s.run(rid)['warnings']))
+            self.e.pause(rid, 'pause anyway')
+            self.assertEqual(self.s.run(rid)['status'], 'paused')
+            self.e.pause(rid, 'cancel anyway', cancel=True)
+        self.assertEqual(self.s.run(rid)['status'], 'cancelled')
+        self.assertFalse(self.s.task(rid, 'two')['claims_held'])
+
+
 if __name__ == '__main__':
     unittest.main()

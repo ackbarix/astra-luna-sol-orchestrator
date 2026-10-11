@@ -3,10 +3,14 @@ from __future__ import annotations
 import copy
 import json
 import re
+import subprocess
 import uuid
 from .common import ACTIVE, TERMINAL, ROLES, HarnessError, counted_tokens, digest, ident, now, overlap, relative, checked_path
 from .snapshot import capture
 from . import efficiency
+
+# Attempt states that are already closed and must not be rewritten.
+ATTEMPT_FINAL = {'completed', 'failed', 'interrupted', 'cancelled'}
 
 
 def validate_plan(plan):
@@ -84,6 +88,12 @@ def validate_plan(plan):
     return p
 
 
+def holds_claim(task):
+    """Write/resource claims are held while a worker may still act, and after
+    it stopped until finish/accept records the result."""
+    return task['status'] in ACTIVE or (task['status'] == 'awaiting_validation' and bool(task.get('claims_held')))
+
+
 class Engine:
     def __init__(self, store):
         self.s = store
@@ -114,6 +124,12 @@ class Engine:
                 self.s.save_task(item)
             self.s.event('start:' + rid, rid, 'run_started', {'mode': mode, 'requested_head': 'gpt-6-astra/medium'})
         return rid
+
+    def live_tasks(self):
+        """Tasks of non-terminal runs. Every cross-run scan must use this:
+        completed/cancelled runs can never release anything again."""
+        closed = {r['id'] for r in self.s.runs() if r['status'] in TERMINAL}
+        return [t for t in self.s.tasks() if t['run'] not in closed]
 
     def budget(self, run):
         """Soft budget position in counted tokens (uncached input + output)."""
@@ -187,9 +203,8 @@ class Engine:
                     reasons.append('model/effort override conflicts with pinned role')
             if any(self.s.task(rid, d)['status'] != 'completed' for d in task['depends_on']):
                 reasons.append('dependency not completed')
-            all_tasks = self.s.tasks()
-            held = [t for t in all_tasks
-                    if t['status'] in ACTIVE or (t['status'] == 'awaiting_validation' and t.get('claims_held'))]
+            all_tasks = self.live_tasks()
+            held = [t for t in all_tasks if holds_claim(t)]
             active = [t for t in all_tasks
                       if t['run'] == rid and t['status'] in ACTIVE and t.get('executor') != 'head']
             policy = run['plan'].get('efficiency', {})
@@ -248,6 +263,7 @@ class Engine:
     def bind(self, rid, call_id, thread):
         ident(thread)
         with self.s.tx():
+            run = self.s.run(rid)
             tasks = [t for t in self.s.tasks(rid) if t['attempts'] and t['attempts'][-1]['call_id'] == call_id]
             if len(tasks) != 1:
                 raise HarnessError('Cannot correlate spawn response to one task')
@@ -261,9 +277,13 @@ class Engine:
             worker = self.s.get('workers', thread) or {}
             attempt['thread_id'] = thread
             ended = worker.get('stopped')
+            attempt['ended'] = ended
+            if run['status'] != 'running':
+                # A paused run keeps the task uncertain until resume reconciles it.
+                self.s.save_task(task)
+                return {'bound': True, 'reason': 'run is ' + run['status'] + '; task left ' + task['status']}
             attempt['status'] = 'awaiting_validation' if ended else 'running'
             task['status'] = attempt['status']
-            attempt['ended'] = ended
             self.s.save_task(task)
             return {'bound': True, 'reason': None}
 
@@ -280,9 +300,14 @@ class Engine:
                     self.s.save_task(task)
 
     def finish(self, rid, tid, note, failed=False, stopped=False, error_code='work_failure'):
+        """Record a worker result and release its claims.
+
+        Claim release never depends on the code fingerprint: when capture()
+        fails the result is recorded with snapshot None and a run warning.
+        """
         if not note or len(note) > 4000:
             raise HarnessError('A short evidence/result note is required')
-        snapshot = capture(self.s.project)
+        snapshot, warning = self._try_capture()
         with self.s.tx():
             run = self.s.run(rid)
             task = self.s.task(rid, tid)
@@ -292,16 +317,19 @@ class Engine:
                 raise HarnessError('Task is not in progress')
             if task['status'] in ACTIVE and not stopped and task.get('executor') != 'head':
                 raise HarnessError('Confirm worker stopped before releasing its claims')
+            digest_now = snapshot['digest'] if snapshot else None
             task['status'] = 'failed' if failed else 'awaiting_validation'
             task['claims_held'] = False
-            task['result'] = {'note': note, 'snapshot': snapshot['digest'], 'basis': 'caller_reported', 'stamp': now()}
+            task['result'] = {'note': note, 'snapshot': digest_now, 'basis': 'caller_reported', 'stamp': now()}
             attempt = task['attempts'][-1]
             attempt['status'] = task['status']
             attempt['ended'] = attempt.get('ended') or now()
             attempt['result_recorded_at'] = now()
             if failed:
-                attempt['failure'] = digest({'code': error_code, 'snapshot': snapshot['digest']})
+                attempt['failure'] = digest({'code': error_code, 'snapshot': digest_now})
             self.s.save_task(task)
+            self._observe(run, digest_now, warning, 'finish ' + tid)
+            self.s.save_run(run)
 
     def accept(self, rid, tid):
         snap = capture(self.s.project)['digest']
@@ -312,6 +340,10 @@ class Engine:
                 raise HarnessError('Run is terminal')
             if task['status'] != 'awaiting_validation' or not task.get('result'):
                 raise HarnessError('Result must be recorded before acceptance')
+            attempt = task['attempts'][-1] if task['attempts'] else {}
+            started = attempt.get('started') or 0
+            if not attempt.get('result_recorded_at') or task['result'].get('stamp', 0) < started:
+                raise HarnessError('Record this attempt\'s result with finish before acceptance')
             for key in task['checks']:
                 if not self.evidence_valid(run['evidence'].get(key), snap):
                     raise HarnessError('Missing current passing task check: ' + key)
@@ -322,6 +354,8 @@ class Engine:
             if task['attempts']:
                 task['attempts'][-1]['status'] = 'completed'
             self.s.save_task(task)
+            self._observe(run, snap)
+            self.s.save_run(run)
 
     def retry(self, rid, tid, approach, role=None):
         if not approach or len(approach) > 2000:
@@ -351,6 +385,8 @@ class Engine:
                 if efficient:
                     task['role_override_reason'] = approach[:500]
             task['status'] = 'pending'
+            # The failed attempt's result must never satisfy a later accept.
+            task['result'] = None
             self.s.save_task(task)
             # No spawn or external action occurs here.
 
@@ -364,7 +400,23 @@ class Engine:
                 raise HarnessError('Unknown criterion or terminal run')
             run['assessments'][key] = {'note': note[:2000], 'actor': actor[:100], 'snapshot': snap,
                                        'basis': 'self_reported_assessment', 'stamp': now()}
+            self._observe(run, snap)
             self.s.save_run(run)
+
+    def _try_capture(self):
+        """(snapshot, None) or (None, warning) when the fingerprint fails."""
+        try:
+            return capture(self.s.project), None
+        except (HarnessError, OSError, UnicodeError, subprocess.SubprocessError) as ex:
+            return None, 'code snapshot unavailable (' + type(ex).__name__ + '): ' + str(ex)[:200]
+
+    def _observe(self, run, snap, warning=None, context=''):
+        """Record a fresh capture taken under the run's authority so resume
+        compares against what the harness last saw, not only verify/resume."""
+        if snap:
+            run['last_snapshot'] = snap
+        if warning:
+            run.setdefault('warnings', []).append((context + ': ' if context else '') + warning)
 
     def evidence_valid(self, evidence, snap):
         if not evidence or evidence['status'] != 'passed' or evidence['snapshot'] != snap:
@@ -395,24 +447,37 @@ class Engine:
         return out
 
     def complete(self, rid):
+        """Certify completion. A completed run is never downgraded: completing
+        it again returns the recorded result for the same code, or an error
+        when the code differs."""
         snap = capture(self.s.project)['digest']
         with self.s.tx():
             run = self.s.run(rid)
-            if run['status'] not in ('running', 'completed'):
+            if run['status'] == 'completed':
+                if run.get('completed_snapshot') != snap:
+                    raise HarnessError('Completed run belongs to different code; start a new run')
+                return {'completed': True, 'problems': [], 'already_completed': True}
+            if run['status'] != 'running':
                 raise HarnessError('Resume/reconcile the run before completing')
-            if run['status'] == 'completed' and run.get('completed_snapshot') != snap:
-                raise HarnessError('Completed run belongs to different code; start a new run')
             issues = self.problems(run, snap)
             run['completion_requested'] = bool(issues)
             run['completion_problems'] = issues
-            run['status'] = 'running' if issues else 'completed'
+            self._observe(run, snap)
             if not issues:
+                run['status'] = 'completed'
                 run['completed_snapshot'] = snap
                 run.setdefault('closed_at', now())
             self.s.save_run(run)
             return {'completed': not issues, 'problems': issues}
 
     def pause(self, rid, reason, cancel=False):
+        """Pause (active tasks become uncertain) or cancel a run.
+
+        Cancel releases every claim: claim-holding tasks become 'cancelled'
+        and their open attempts are marked cancelled, because a terminal run
+        can never finish, retry or accept them later. Neither path needs a
+        code fingerprint.
+        """
         with self.s.tx():
             run = self.s.run(rid)
             if run['status'] in TERMINAL:
@@ -422,14 +487,27 @@ class Engine:
             run['completion_requested'] = False
             if cancel:
                 run.setdefault('closed_at', now())
-            run['checkpoint'] = run.get('last_snapshot', run['baseline']['digest'])
             for task in self.s.tasks(rid):
-                if task['status'] in ACTIVE:
+                if cancel and (task['status'] in ACTIVE or task.get('claims_held')):
+                    task['status'] = 'cancelled'
+                    task['claims_held'] = False
+                    if task['attempts'] and task['attempts'][-1]['status'] not in ATTEMPT_FINAL:
+                        task['attempts'][-1]['status'] = 'cancelled'
+                        task['attempts'][-1]['ended'] = task['attempts'][-1].get('ended') or now()
+                    self.s.save_task(task)
+                elif not cancel and task['status'] in ACTIVE:
                     task['status'] = 'uncertain'
                     self.s.save_task(task)
             self.s.save_run(run)
 
     def resume(self, rid, accept_drift=False, workers_stopped=False, session=None):
+        """Reconcile a paused/blocked run without replaying work.
+
+        Only reserved/running/uncertain tasks need confirmation that their
+        worker stopped; with --workers-stopped they become failed/interrupted.
+        awaiting_validation tasks (worker known stopped) keep their status and
+        stay finish-able.
+        """
         snapshot = capture(self.s.project)
         with self.s.tx():
             run = self.s.run(rid)
@@ -439,7 +517,7 @@ class Engine:
                 raise HarnessError('Completed run; create a new run')
             if snapshot['digest'] != run.get('last_snapshot', run['baseline']['digest']) and not accept_drift:
                 raise HarnessError('Worktree/HEAD differs: inspect changes, then --accept-drift')
-            active = [t for t in self.s.tasks(rid) if t['status'] in ACTIVE or t.get('claims_held')]
+            active = [t for t in self.s.tasks(rid) if t['status'] in ACTIVE]
             if (active or run.get('verification')) and not workers_stopped:
                 raise HarnessError('Confirm old workers/verification process stopped; no automatic duplicate dispatch')
             if session:
