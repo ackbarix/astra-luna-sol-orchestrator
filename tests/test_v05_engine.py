@@ -370,10 +370,12 @@ class VerificationLockTests(EngineCase):
             os.kill(verify_proc.pid, signal.SIGUSR1)
             time.sleep(1)
             stack = self.verify_err.read_text(errors='replace')[-12000:]
+        events = [dict(r) for r in self.s.db.execute(
+            "SELECT key, kind, doc FROM events WHERE kind='verification_lock_cleared'")]
         self.fail('check group leader %s still alive: process_info=%r recorded_start=%r ps=%r verify_rc=%r\n'
-                  'verify stack:\n%s'
+                  'lock events: %r\nverify stack:\n%s'
                   % (pid, process_info(pid), start, raw.stdout.strip(),
-                     verify_proc.poll() if verify_proc is not None else None, stack))
+                     verify_proc.poll() if verify_proc is not None else None, events, stack))
 
     def test_lock_records_owner_and_check_group(self):
         rid = self.start(argv=self.SLOW)
