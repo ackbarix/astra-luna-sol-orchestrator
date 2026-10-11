@@ -326,7 +326,6 @@ class VerificationLockTests(EngineCase):
 
     def spawn_verify(self, rid):
         code = ('import sys, faulthandler, signal; faulthandler.register(signal.SIGUSR1, all_threads=True);'
-                'faulthandler.dump_traceback_later(5, repeat=True);'
                 'sys.path.insert(0, sys.argv[1]); from pathlib import Path;'
                 'from als_harness.state import Store; from als_harness.engine import Engine;'
                 'from als_harness import verify;'
@@ -469,6 +468,29 @@ class ProcessIdentityFallbackTests(unittest.TestCase):
             child.wait()
             self.assertFalse(common.process_alive(child.pid, start))
 
+
+    def test_unlisted_pid_with_successful_kill_is_reported_exited(self):
+        """macOS: an exited (zombie) process is missing from `ps -p` while
+        kill(pid, 0) still succeeds; it must not count as alive."""
+        from als_harness import common
+
+        def no_proc(path):
+            raise FileNotFoundError(path)
+
+        empty = subprocess.CompletedProcess(['ps'], 1, b'', b'')
+        with patch.object(common.sys, 'platform', 'darwin'), patch.object(Path, 'read_bytes', no_proc), \
+                patch.object(common.os, 'kill', return_value=None), \
+                patch.object(common.subprocess, 'run', return_value=empty):
+            self.assertEqual(common.process_info(4242), ('X', None))
+            self.assertFalse(common.process_alive(4242))
+            self.assertFalse(common.process_alive(4242, 'Mon Oct 12 00:00:00 2026'))
+            self.assertIsNone(common.process_start(4242))
+        with patch.object(common.sys, 'platform', 'darwin'), patch.object(Path, 'read_bytes', no_proc), \
+                patch.object(common.os, 'kill', return_value=None), \
+                patch.object(common.subprocess, 'run', side_effect=FileNotFoundError('ps')):
+            # ps unavailable: unknown, so liveness stays conservative (alive).
+            self.assertIsNone(common.process_info(4242))
+            self.assertTrue(common.process_alive(4242))
 
 class TaskCheckConcurrencyTests(EngineCase):
     def test_task_check_runs_beside_read_only_and_other_run_writers(self):

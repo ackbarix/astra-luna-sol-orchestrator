@@ -165,8 +165,18 @@ def process_info(pid):
             return None
     if sys.platform.startswith('linux'):
         return None
-    line = _command_output(['ps', '-o', 'stat=,lstart=', '-p', str(pid)])
-    if not line or len(line.split(None, 1)) != 2:
+    try:
+        result = subprocess.run(['ps', '-o', 'stat=,lstart=', '-p', str(pid)], capture_output=True, timeout=5,
+                                env=dict(os.environ, LC_ALL='C'))
+    except (OSError, subprocess.SubprocessError):
+        return None  # ps unavailable: unknown, callers stay conservative
+    line = result.stdout.decode('utf-8', 'replace').strip()
+    if not line:
+        # ps ran but lists no such process. A running process is always
+        # listed; macOS omits exited (zombie) processes even though kill(pid, 0)
+        # still succeeds for them. Report it as exited, not unknown.
+        return ('X', None) if result.returncode in (0, 1) else None
+    if len(line.split(None, 1)) != 2:
         return None
     state, started = line.split(None, 1)
     return state[0], ' '.join(started.split())
