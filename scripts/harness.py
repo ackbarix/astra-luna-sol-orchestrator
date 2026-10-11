@@ -3,8 +3,9 @@
 from pathlib import Path
 import sys
 
-if sys.version_info < (3, 11):
-    raise SystemExit('Python 3.11+ required')
+if sys.version_info < (3, 9):
+    raise SystemExit('ALS harness needs Python 3.9 or newer (found %d.%d). '
+                     'Install a newer python3 and re-run this command with it.' % sys.version_info[:2])
 here = Path(__file__).resolve().parent
 if here.name == 'scripts':
     sys.path.insert(0, str(here.parent))

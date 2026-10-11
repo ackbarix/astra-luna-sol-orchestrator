@@ -10,10 +10,16 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from .common import HarnessError, checked_path, now, redact
 from .engine import Engine, validate_plan
 from .state import Store
 from . import state, hooks, report, usage, verify, efficiency, telemetry
+
+try:
+    from . import deps  # COMPAT(0.5 installer branch): provided by als_harness/deps.py
+except ImportError:
+    deps = None
 
 # Directory holding this harness (als_harness/ and harness.py when installed).
 HOME = Path(__file__).resolve().parents[1]
@@ -29,20 +35,34 @@ def detect_scope(home=HOME):
 
 
 def git_project(cwd):
-    """Main project for a directory: git common dir's parent, so forked worktrees map home."""
-    def rev_parse(*flags):
+    """Main project for a directory: git common dir's parent, so forked worktrees map home.
+
+    Portable to old git: no --path-format (git >= 2.31); relative output is resolved here.
+    """
+    cwd = Path(cwd).resolve()
+
+    def rev_parse(flag):
         try:
-            done = subprocess.run(['git', '-C', str(cwd), 'rev-parse', *flags],
+            done = subprocess.run(['git', '-C', str(cwd), 'rev-parse', flag],
                                   capture_output=True, text=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             return None
         value = done.stdout.strip()
-        return Path(value) if done.returncode == 0 and value else None
-    common = rev_parse('--path-format=absolute', '--git-common-dir')
-    if common is not None and common.name == '.git' and common.parent.is_dir():
-        return common.parent.resolve()
+        return value if done.returncode == 0 and value else None
     top = rev_parse('--show-toplevel')
-    return top.resolve() if top is not None and top.is_dir() else None
+    common = rev_parse('--git-common-dir')
+    if common is not None:
+        # Relative output is relative to cwd; very old git printed it relative to the top level.
+        candidates = [cwd / common] + ([Path(top) / common] if top else [])
+        for candidate in candidates:
+            candidate = candidate.resolve()
+            if candidate.name == '.git' and candidate.is_dir():
+                return candidate.parent
+    return Path(top).resolve() if top and Path(top).is_dir() else None
+
+
+NOT_A_PROJECT = ('Not inside a git project. Next: cd into the project (any subdirectory or worktree)'
+                 ' or pass --project <path>.')
 
 
 def resolve_project(args, scope, payload=None):
@@ -56,7 +76,10 @@ def resolve_project(args, scope, payload=None):
         if not isinstance(cwd, str) or not cwd or not Path(cwd).is_dir():
             return None
         return git_project(Path(cwd))
-    return git_project(Path.cwd()) or Path.cwd().resolve(strict=True)
+    found = git_project(Path.cwd())
+    if found is None:
+        raise HarnessError(NOT_A_PROJECT)
+    return found
 
 
 def supports_scope(func):
@@ -126,6 +149,31 @@ def missing_events(doc):
     return missing
 
 
+def dependency_report(project):
+    if deps is None:
+        return {'ok': None, 'items': [], 'note': 'dependency checker unavailable in this install'}
+    try:
+        return deps.check(project)
+    except Exception as ex:  # a broken checker must not hide the rest of doctor
+        return {'ok': None, 'items': [], 'note': 'dependency check failed: ' + type(ex).__name__}
+
+
+def doctor_text(result):
+    lines = ['ALS doctor (' + result['scope'] + ' scope)',
+             'state:  ' + result['state_path'],
+             'hooks:  ' + ('configured' if result['hooks_configured'] else 'NOT configured')
+             + ' (' + str(result.get('hooks_file')) + ')']
+    failing = ['FAIL ' + issue for issue in result['issues']]
+    for item in result.get('deps', {}).get('items', []):
+        if not item.get('ok'):
+            failing.append('FAIL ' + str(item.get('name')) + ': found ' + str(item.get('found'))
+                           + ', need ' + str(item.get('required')) + ' -> ' + str(item.get('hint') or ''))
+    if result.get('deps', {}).get('ok') is None:
+        lines.append('deps:   not checked (' + str(result.get('deps', {}).get('note')) + ')')
+    lines.append('summary: ' + ('all checks passed' if not failing else str(len(failing)) + ' problem(s)'))
+    return '\n'.join(lines + failing)
+
+
 def doctor(project, store, probe=False, scope='project'):
     issues = []
     installed = False
@@ -137,9 +185,10 @@ def doctor(project, store, probe=False, scope='project'):
         missing = missing_events(doc)
         installed = not missing
         if not installed:
-            issues.append('ALS hook handler missing for ' + ', '.join(missing) + '; review /hooks')
+            issues.append('ALS hook handler missing for ' + ', '.join(missing)
+                          + ' -> reinstall ALS hooks, then review /hooks in Codex')
     except (OSError, ValueError, HarnessError):
-        issues.append('Hooks file not installed/readable')
+        issues.append('Hooks file not installed/readable -> install ALS hooks, or use the CLI without hooks')
     observed = {}
     rows = store.db.execute('SELECT id,doc FROM sessions ORDER BY rowid DESC LIMIT 8') if store else []
     for row in rows:
@@ -150,6 +199,7 @@ def doctor(project, store, probe=False, scope='project'):
               'paid_model_calls': False, 'hook_trust_verified': False, 'blocking_behavior_verified': False,
               'note': 'Review/trust with /hooks. Observed callbacks and fixtures are not an end-to-end proof'
                       ' of installed Codex enforcement.'}
+    result['deps'] = dependency_report(project)
     if probe:
         result['probes'] = {}
         for key, cmd in {'version': ['codex', '--version'], 'features': ['codex', 'features', 'list']}.items():
@@ -171,7 +221,7 @@ def parser():
                         ' otherwise the main worktree of the current directory (hooks: of the payload cwd).')
     sub = p.add_subparsers(dest='cmd', required=True)
     start = sub.add_parser('start')
-    start.add_argument('--plan', type=Path, required=True)
+    start.add_argument('--plan', type=Path, required=True, help="Plan JSON file, or '-' for stdin.")
     start.add_argument('--session', default=None,
                        help='Codex session id. Default: $CODEX_THREAD_ID, else the single SessionStart receipt'
                             ' from the last 10 minutes. With zero or several, guarded mode refuses and observe'
@@ -180,12 +230,15 @@ def parser():
     start.add_argument('--ack-hook-limits', action='store_true')
     d = sub.add_parser('doctor')
     d.add_argument('--probe', action='store_true')
+    d.add_argument('--format', choices=['json', 'text'], default='json')
     sub.add_parser('hook')
-    status = sub.add_parser('status')
+    status = sub.add_parser('status', help='Unfinished runs (all with --all), or one run with --run.')
     status.add_argument('--run')
+    status.add_argument('--all', action='store_true')
     status.add_argument('--compact', action='store_true')
+    status.add_argument('--format', choices=['json', 'text'], default='json')
     prep = sub.add_parser('prepare')
-    prep.add_argument('--plan', type=Path, required=True)
+    prep.add_argument('--plan', type=Path, required=True, help="Plan JSON file, or '-' for stdin.")
     prep.add_argument('--profile', choices=sorted(efficiency.PROFILES), default='balanced')
     prep.add_argument('--use-history', action='store_true')
     ana = sub.add_parser('analyze')
@@ -239,16 +292,73 @@ def parser():
     return p
 
 
+PLAN_LIMIT = 262144
+UNFINISHED = {'completed', 'cancelled'}
+
+
+def read_plan(path):
+    if str(path) == '-':
+        raw = sys.stdin.buffer.read(PLAN_LIMIT + 1)
+    else:
+        raw = path.read_bytes()
+    if len(raw) > PLAN_LIMIT:
+        raise HarnessError('Plan file too large')
+    try:
+        return json.loads(raw)
+    except ValueError as ex:
+        raise HarnessError('Plan is not valid JSON (' + str(ex)[:120] + ').'
+                           ' Next: fix the file, then harness.py prepare --plan <file> to validate it.') from ex
+
+
+def status_rows(store, everything=False):
+    keys = ('id', 'status', 'session', 'mode', 'updated')
+    return [{k: r.get(k) for k in keys} for r in store.runs() if everything or r['status'] not in UNFINISHED]
+
+
+def status_text(out):
+    if 'runs' not in out:
+        return None
+    if not out['runs']:
+        return (out.get('note') or 'No unfinished runs') + '. Next: harness.py start --plan <plan.json>'
+    lines = ['%-16s  %-9s  %-8s  %-20s  %s' % ('RUN', 'STATUS', 'MODE', 'SESSION', 'UPDATED')]
+    for r in out['runs']:
+        updated = r.get('updated')
+        stamp = time.strftime('%Y-%m-%d %H:%M', time.localtime(updated)) if isinstance(updated, (int, float)) else '-'
+        lines.append('%-16s  %-9s  %-8s  %-20s  %s' % (r['id'], r['status'], r.get('mode') or '-',
+                                                       (r.get('session') or '-')[:20], stamp))
+    return '\n'.join(lines)
+
+
+def next_step(args, message):
+    """One concrete follow-up command for common mistakes; None when there is no obvious one."""
+    run = getattr(args, 'run', None) or '<run>'
+    hints = (
+        ('Unknown run', 'harness.py status --all  (lists run ids)'),
+        ('Unknown task', 'harness.py status --run ' + run + '  (lists task ids)'),
+        ('No managed runs', 'harness.py start --plan <plan.json>'),
+        ('Worktree/HEAD differs', 'git status; after reviewing: harness.py resume --run ' + run + ' --accept-drift'),
+        ('Confirm old workers', 'after confirming no worker is still running: harness.py resume --run ' + run
+         + ' --workers-stopped'),
+        ('Confirm worker stopped', 'after confirming the worker stopped: harness.py finish --run ' + run
+         + ' --task <task> --note <result> --workers-stopped'),
+        ('Session already has an unfinished run', 'harness.py status  (then resume or cancel that run)'),
+        ('Guarded mode needs', 'harness.py start --plan <plan.json> --mode observe  (guarded needs real hook'
+         ' receipts and --ack-hook-limits)'),
+        ('Plan file too large', 'shrink the plan below 256 KiB'),
+    )
+    for needle, hint in hints:
+        if needle in message:
+            return hint
+    return None
+
+
 def dispatch(args, store):
     """Run one state-backed command; returns (output, exit code) or (None, 0) when already printed."""
     e = Engine(store)
     code = 0
     out = None
     if args.cmd == 'start':
-        data = args.plan.read_bytes()
-        if len(data) > 262144:
-            raise HarnessError('Plan file too large')
-        plan = json.loads(data)
+        plan = read_plan(args.plan)
         session, source, problem = args.session, 'explicit', None
         if session is None:
             session, source, problem = default_session(store, args.mode)
@@ -263,7 +373,7 @@ def dispatch(args, store):
         if args.run:
             out = report.report(e, args.run)
         else:
-            out = {'runs': [{k: r.get(k) for k in ('id', 'status', 'session', 'mode', 'updated')} for r in store.runs()]}
+            out = {'runs': status_rows(store, args.all)}
     elif args.cmd == 'task-message':
         r = store.run(args.run)
         t = store.task(args.run, args.task)
@@ -324,10 +434,7 @@ def offline(args, project):
     exists = state_path(project, args.scope).is_file()
     try:
         if args.cmd == 'prepare':
-            raw = args.plan.read_bytes()
-            if len(raw) > 262144:
-                raise HarnessError('Plan file too large')
-            plan = json.loads(raw)
+            plan = read_plan(args.plan)
             if args.use_history and exists:
                 store = open_store(project, args.scope)
             history = telemetry.history(store, plan.get('workload', 'unspecified')) if args.use_history else None
@@ -347,6 +454,15 @@ def offline(args, project):
     finally:
         if store:
             store.close()
+
+
+def emit(args, out):
+    if getattr(args, 'format', 'json') == 'text':
+        text = doctor_text(out) if args.cmd == 'doctor' else status_text(out) if args.cmd == 'status' else None
+        if text is not None:
+            print(text)
+            return
+    print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
 def main(argv=None):
@@ -373,8 +489,8 @@ def main(argv=None):
             if args.cmd == 'doctor':
                 out = doctor(project, None, args.probe, args.scope)
             else:
-                out = {'runs': [], 'note': 'No managed runs registered'}
-            print(json.dumps(out, ensure_ascii=False, indent=2))
+                out = {'runs': [], 'note': 'No managed runs registered', 'next': 'harness.py start --plan <plan.json>'}
+            emit(args, out)
             return 0
         store = open_store(project, args.scope)
         if args.cmd == 'hook':
@@ -384,7 +500,7 @@ def main(argv=None):
             out, code = dispatch(args, store)
             if out is None:
                 return code
-        print(json.dumps(out, ensure_ascii=False, indent=2))
+        emit(args, out)
         return code
     except (HarnessError, OSError, ValueError, TypeError, KeyError, sqlite3.Error, subprocess.TimeoutExpired) as ex:
         if args.cmd == 'hook':
@@ -394,7 +510,15 @@ def main(argv=None):
                                         + '. No completion certification or automatic recovery.'
                                         + ' Inspect harness.py doctor.')))
             return 0
-        print('ALS ERROR: ' + redact(str(ex)), file=sys.stderr)
+        message = redact(str(ex)) if str(ex) else type(ex).__name__
+        if isinstance(ex, FileNotFoundError):
+            message = 'File not found: ' + redact(str(ex.filename))
+            hint = "check the path; pass --plan - to read the plan from stdin"
+        else:
+            hint = next_step(args, message)
+        print('ALS ERROR: ' + message, file=sys.stderr)
+        if hint and 'Next:' not in message:
+            print('Next: ' + hint, file=sys.stderr)
         return 2
     finally:
         if store:
