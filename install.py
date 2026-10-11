@@ -49,11 +49,17 @@ HOOKS = ".codex/hooks.json"
 IGNORE = ".astra-luna-sol/.gitignore"
 PROFILE = "als.config.toml"
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-# Directories that only ALS creates; used to tidy pre-0.5 installs whose
-# manifests did not record created directories.
+# Directories ALS creates in a project; used to tidy pre-0.5 installs whose
+# manifests did not record created directories. Removal is empty-only.
 LEGACY_DIRS = [".astra-luna-sol/als_harness", ".astra-luna-sol/licenses", ".astra-luna-sol",
-               ".agents/skills/astra-luna-sol"]
+               ".agents/skills/astra-luna-sol", ".agents/skills", ".agents", ".codex/agents"]
 EXIT_OK, EXIT_ABSENT, EXIT_DRIFT, EXIT_OUTDATED = 0, 1, 2, 4
+
+
+def legacy_dirs(state: dict) -> list[str]:
+    """LEGACY_DIRS, plus .codex when ALS created .codex/config.toml there."""
+    created_config = (state.get("config") or {}).get("mode") == "created"
+    return LEGACY_DIRS + ([".codex"] if created_config else [])
 
 
 class Refused(ValueError):
@@ -551,9 +557,24 @@ def resolve_policy(target: Path, requested: str | None, state: dict, remedy_args
     return rel
 
 
+def hooks_only_registered(target: Path) -> bool:
+    """The global manifest lists target as a --hooks-only project."""
+    try:
+        als_home = global_homes()[0]
+        state = json.loads((als_home / "manifest.json").read_text(encoding="utf-8"))
+    except (Refused, OSError, ValueError):
+        return False
+    projects = state.get("hooks_projects") if isinstance(state, dict) else None
+    return isinstance(projects, dict) and str(target) in projects
+
+
 def project_mode(args) -> int:
     target = validate_target(args.target)
-    if config_overlay.tomllib is None:
+    removing = args.uninstall or args.force_uninstall
+    no_toml = config_overlay.tomllib is None
+    # --check/--uninstall of an installer-created config.toml compares/removes
+    # bytes only; anything that merges or parses TOML needs a parser.
+    if no_toml and not (args.check or removing):
         raise Refused(config_overlay.TOML_MISSING)
     layout = Layout({"": target})
     session = Session(layout)
@@ -566,10 +587,11 @@ def project_mode(args) -> int:
         raise Refused("Manifest includes unknown managed paths; manual review required")
     if CONFIG in state["files"]:
         state.setdefault("config", {"mode": "created", "sha256": state["files"].pop(CONFIG)})
-    removing = args.uninstall or args.force_uninstall
     if raw_state is None and (args.check or removing):
         print("Not installed")
         return EXIT_ABSENT if args.check else EXIT_OK
+    if no_toml and (state.get("config") or {}).get("mode", "created") != "created":
+        raise Refused(config_overlay.TOML_MISSING + " (this install merged ALS keys into " + CONFIG + ")")
     mode_args = [] if not args.skip_hooks else ["--skip-hooks"]
     policy = resolve_policy(target, args.policy_file, state, mode_args)
     desired = {rel: path.read_bytes() for rel, path in src.items()}
@@ -687,9 +709,13 @@ def project_mode(args) -> int:
         if config_overlay.parse(text(before_config)).get("hooks"):
             raise Refused("Inline Codex hooks already exist in " + CONFIG + "; reconcile them or install without "
                           "hooks: " + installer_command(t, "--skip-hooks"))
+        base_hooks = restored_hooks if hooks_state else before_hooks
+        if hooks_only_registered(target) or (base_hooks is not None and hook_config.has_global_handler(
+                hook_config.parse(base_hooks))):
+            raise Refused("This project has --hooks-only ALS hooks that call the global harness. In " + t
+                          + " run `als uninstall --hooks-only` first, then rerun the project install.")
         python = hook_python()
-        hooks_data, next_hooks = hook_config.merge(restored_hooks if hooks_state else before_hooks, None,
-                                                   "project", None, python)
+        hooks_data, next_hooks = hook_config.merge(base_hooks, None, "project", None, python)
         git_warning(target)
 
     plan: dict[str, bytes | None] = dict(desired)
@@ -712,7 +738,14 @@ def project_mode(args) -> int:
     for key in plan:
         session.snapshot(key)
     session.snapshot(MANIFEST)
-    previous_dirs = [d for d in state.get("created_dirs", []) if layout.dir_path(d)]
+    if "created_dirs" in state:
+        previous_dirs = [d for d in state["created_dirs"] if layout.dir_path(d)]
+    elif raw_state is not None:
+        # Pre-0.5 manifest: seed with the ALS directories that exist now, so
+        # a later uninstall still tidies them (empty-only removal).
+        previous_dirs = [d for d in legacy_dirs(state) if (target / d).is_dir() and not (target / d).is_symlink()]
+    else:
+        previous_dirs = []
     new_dirs = [layout.dir_key(d) for d in planned_dirs(layout, [*plan, MANIFEST])]
     manifest = {"version": VERSION, "files": {rel: digest(data) for rel, data in desired.items()},
                 "config": next_config, "hooks": next_hooks, "agents": digest(block.encode()),
@@ -835,7 +868,7 @@ def project_uninstall(session, state, args, policy, restored, config_state, conf
     commit(target, plan, {k: session.snapshots[k] for k in plan}, None, layout)
     remove_pycache(target / ".astra-luna-sol/als_harness")
     recorded = [layout.dir_path(d) for d in state.get("created_dirs", [])] if "created_dirs" in state else \
-        [target / d for d in LEGACY_DIRS]
+        [target / d for d in legacy_dirs(state)]
     remove_empty_dirs([d for d in recorded if d is not None])
     print("UNINSTALL OK" + (" (forced; see BACKUP/KEEP lines above)" if drifted else ""))
     return EXIT_OK
@@ -921,8 +954,9 @@ def global_mode(args) -> int:
         return EXIT_OK
     if removing:
         if projects:
-            raise Refused("Projects still use the global harness through hooks; remove them first:\n  "
-                          + "\n  ".join(installer_command(p, "--hooks-only", "--uninstall") for p in projects))
+            raise Refused("Projects still use the global harness through hooks; run `als uninstall --hooks-only` "
+                          "in each project first:\n  "
+                          + "\n  ".join("cd " + shlex.quote(p) + " && als uninstall --hooks-only" for p in projects))
         if modified and not args.force_uninstall:
             raise Refused("Uninstall would lose changes to: " + ", ".join(layout.show(k) for k in modified)
                           + ". Inspect them, or back them up and remove ALS-managed paths with: "
@@ -985,12 +1019,29 @@ def global_mode(args) -> int:
     return EXIT_OK
 
 
+HOOKS_HEADER = re.compile(r'''\s*\[\[?\s*(?:hooks|"hooks"|'hooks')\s*[.\]]''')
+ROOT_HOOKS_KEY = re.compile(r'''\s*(?:hooks|"hooks"|'hooks')\s*[.=]''')
+
+
 def inline_hooks(content: str) -> bool:
-    """[hooks] tables in a project config.toml (text scan without a TOML parser)."""
+    """Codex hooks defined inline in a project config.toml.
+
+    Only the root ``hooks`` key counts: ``[hooks...]``/``[[hooks...]]`` tables
+    or root-level ``hooks =``/``hooks.x =``. ``[features] hooks = true`` (the
+    feature switch) does not. The text scan is used without a TOML parser.
+    """
     if config_overlay.tomllib is not None:
         return bool(config_overlay.parse(content).get("hooks"))
-    return any(re.match(r'\s*(\[\[?\s*["\']?hooks\b|["\']?hooks["\']?\s*[.=])', line)
-               for line in content.splitlines())
+    lines = content.splitlines()
+    at_root = True
+    for line, header in zip(lines, config_overlay.table_headers(lines)):
+        if header:
+            if HOOKS_HEADER.match(line):
+                return True
+            at_root = False
+        elif at_root and ROOT_HOOKS_KEY.match(line):
+            return True
+    return False
 
 
 def hooks_only_mode(args) -> int:
@@ -1068,7 +1119,8 @@ def hooks_only_mode(args) -> int:
                 or gstate.get("version") != VERSION:
             print("ALS OUTDATED: refresh with " + installer_command(t, "--hooks-only"))
             return EXIT_OUTDATED
-        print("HOOKS VERIFIED " + VERSION + ": " + HOOKS + " -> " + hook_config.command("global", als_home))
+        print("HOOKS VERIFIED " + VERSION + ": " + HOOKS + " -> "
+              + hook_config.command("global", als_home, entry.get("interpreter")))
         return EXIT_OK
     plan: dict[str, bytes | None] = {}
     if removing:
@@ -1111,7 +1163,7 @@ def hooks_only_mode(args) -> int:
         remove_empty_dirs([d for d in recorded if d.is_absolute() and target in d.parents])
         print("HOOKS UNINSTALL OK")
     else:
-        print("HOOKS INSTALL OK: " + HOOKS + " runs " + hook_config.command("global", als_home)
+        print("HOOKS INSTALL OK: " + HOOKS + " runs " + hook_config.command("global", als_home, python)
               + "; trust and review them with /hooks")
     return EXIT_OK
 

@@ -2,8 +2,9 @@
 
 Hook commands are relocatable (0.5): a project install resolves the main
 repository root at run time through git, so moving the project or opening a
-forked worktree/subdirectory keeps working. A global install points at the
-shared ALS home, written as ``$HOME/...`` when it lives under the home dir.
+forked worktree/subdirectory keeps working; a missing harness exits 0. A
+global install points at the shared ALS home, written as
+``${HOME:-/abs/home}/...`` when it lives under the home dir.
 """
 from __future__ import annotations
 
@@ -27,13 +28,23 @@ SPAWN_MATCHER = 'spawn_agent'
 MATCHED_EVENTS = {'PreToolUse', 'PostToolUse'}
 # Portable to old git (no --path-format): --git-common-dir may be relative to
 # the cwd, so resolve it with cd/pwd. Works from subdirectories and worktrees.
-PROJECT_SCRIPT = '"$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/.astra-luna-sol/harness.py"'
-PROJECT_COMMAND = 'python3 ' + PROJECT_SCRIPT + ' hook'
+# The common dir's parent is the main checkout only when the common dir is a
+# ``.git`` directory; in a submodule (.git/modules/NAME) use the top level, like
+# cli.git_project. CDPATH is cleared so an exported CDPATH cannot redirect or
+# pollute the ``cd``. A missing harness (fresh clone, submodule without ALS,
+# no repository) exits 0 silently so it never blocks a tool call.
+PROJECT_RESOLVE = ('c=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0; '
+                   'case $c in .git|*/.git) r=$(CDPATH= cd -- "$c/.." && pwd) ;; '
+                   '*) r=$(git rev-parse --show-toplevel 2>/dev/null) ;; esac || exit 0; '
+                   's=$r/.astra-luna-sol/harness.py; [ -f "$s" ] || exit 0; ')
 DEFAULT_PYTHON = 'python3'
 
 # Any handler that runs a harness.py entrypoint in hook mode: 0.3/0.4 used an
-# absolute path plus --project; 0.5 uses the project/global forms built below.
-ALS_COMMAND = re.compile(r'''harness\.py["']?\s+(?:--project\s+\S+\s+)?hook\b''')
+# absolute path plus --project; 0.5 uses the project/global forms built below
+# (the project form names harness.py first and ends with `exec PY "$s" hook`).
+ALS_COMMAND = re.compile(r'''harness\.py\b.*\shook\s*$''', re.S)
+# Characters that may appear unescaped as the default in "${HOME:-...}".
+_SAFE_HOME = re.compile(r'[A-Za-z0-9_./@%+=:,-]+')
 
 
 def _escape_double_quoted(text):
@@ -50,21 +61,29 @@ def interpreter(python=None):
 
 
 def home_command(als_home, home=None, python=None):
-    """Shell command for a global install; ``$HOME/...`` when under HOME."""
+    """Shell command for a global install.
+
+    Under HOME it is ``"${HOME:-/abs/home}/rel/harness.py"``: relocatable with
+    HOME, and still valid when Codex runs hooks with HOME unset. A home path
+    that needs quoting inside ``${...}`` falls back to the absolute path.
+    """
     target = Path(als_home).expanduser().resolve() / 'harness.py'
     home = Path(home or os.environ.get('HOME') or Path.home()).resolve()
     try:
         rel = target.relative_to(home)
     except ValueError:
+        rel = None
+    if rel is None or not _SAFE_HOME.fullmatch(str(home)):
         return interpreter(python) + ' ' + shlex.quote(str(target)) + ' hook'
-    return interpreter(python) + ' "$HOME/' + _escape_double_quoted(rel.as_posix()) + '" hook'
+    return (interpreter(python) + ' "${HOME:-' + str(home) + '}/'
+            + _escape_double_quoted(rel.as_posix()) + '" hook')
 
 
 def command(scope='project', als_home=None, python=None):
     if isinstance(scope, Path):
         scope = 'project'  # pre-0.5 callers passed the project path
     if scope == 'project':
-        return interpreter(python) + ' ' + PROJECT_SCRIPT + ' hook'
+        return PROJECT_RESOLVE + 'exec ' + interpreter(python) + ' "$s" hook'
     if scope == 'global':
         if als_home is None:
             raise HarnessError('Global hook scope requires the ALS home path')
@@ -172,15 +191,24 @@ def unmanaged_changed(raw, state):
     return before is not None and parse(rest) != parse(before)
 
 
-def has_als_handler(data):
+def handler_commands(data):
     for event_groups in data.get('hooks', {}).values():
         for group in event_groups:
             handlers = group.get('hooks', []) if isinstance(group, dict) else []
             for handler in handlers if isinstance(handlers, list) else []:
                 cmd = handler.get('command') if isinstance(handler, dict) else None
-                if isinstance(cmd, str) and ALS_COMMAND.search(cmd):
-                    return True
-    return False
+                if isinstance(cmd, str):
+                    yield cmd
+
+
+def has_global_handler(data):
+    """An ALS handler that runs a shared (global, --hooks-only) harness."""
+    return any(ALS_COMMAND.search(cmd) and '.astra-luna-sol/harness.py' not in cmd
+               for cmd in handler_commands(data))
+
+
+def has_als_handler(data):
+    return any(ALS_COMMAND.search(cmd) for cmd in handler_commands(data))
 
 
 def merge(raw, old_state, scope='project', als_home=None, python=None):
