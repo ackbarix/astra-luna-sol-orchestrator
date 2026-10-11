@@ -172,14 +172,31 @@ def process_info(pid):
         return None  # ps unavailable: unknown, callers stay conservative
     line = result.stdout.decode('utf-8', 'replace').strip()
     if not line:
-        # ps ran but lists no such process. A running process is always
-        # listed; macOS omits exited (zombie) processes even though kill(pid, 0)
-        # still succeeds for them. Report it as exited, not unknown.
-        return ('X', None) if result.returncode in (0, 1) else None
+        # macOS omits exited (zombie) processes from `ps -p` even though
+        # kill(pid, 0) still succeeds for them: that combination is "exited".
+        # A sandbox (e.g. Codex's Seatbelt profile) can also hide a LIVE
+        # process from ps; then kill(pid, 0) fails too, and the answer stays
+        # unknown so callers remain conservative.
+        if result.returncode in (0, 1) and _signalable(pid):
+            return ('X', None)
+        return None
     if len(line.split(None, 1)) != 2:
         return None
     state, started = line.split(None, 1)
     return state[0], ' '.join(started.split())
+
+
+def _signalable(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def current_uid():
+    getter = getattr(os, 'geteuid', None)
+    return getter() if getter else None
 
 
 def process_start(pid):
@@ -187,26 +204,32 @@ def process_start(pid):
     return info[1] if info else None
 
 
-def process_alive(pid, start=None):
+def process_alive(pid, start=None, uid=None):
     """True when pid exists, is not a zombie and (when known) has the recorded
     start time, i.e. the pid was not recycled by an unrelated process.
 
-    Every pid ALS records (verify processes, check process groups) runs as the
-    current user, so EPERM from kill(pid, 0) proves the pid now belongs to
-    another user's process: ours has exited and the pid was recycled. That is
-    reported as not alive rather than "unknown" (on hardened /proc, e.g.
-    hidepid, another user's process is also unreadable, which used to be
-    treated as alive and kept dead lock owners live)."""
+    Unknown stays alive (fail-safe: a live verification lock must never be
+    released by mistake). EPERM from kill(pid, 0) is NOT proof of death on its
+    own: a sandbox (Codex Seatbelt on macOS) or a different uid (sudo) can
+    deny signals to a live owner, so the start time decides when readable.
+    Only on Linux, when the owner was recorded with this uid, EPERM plus an
+    unreadable /proc entry means another user's process now holds the pid
+    (same-uid processes are always signalable and readable there).
+    """
     if type(pid) is not int or pid <= 0:
         return False
+    denied = False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return False
+        denied = True
     info = process_info(pid)
     if info is None:
+        if (denied and uid is not None and uid == current_uid()
+                and sys.platform.startswith('linux')):
+            return False
         return True
     state, current_start = info
     if state in ('Z', 'X'):

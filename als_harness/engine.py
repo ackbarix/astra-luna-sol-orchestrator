@@ -8,7 +8,7 @@ import signal
 import subprocess
 import uuid
 from .common import (ACTIVE, TERMINAL, ROLES, HarnessError, boot_id, checked_path, counted_tokens, digest, ident,
-                     now, overlap, process_alive, process_start, relative)
+                     current_uid, now, overlap, process_alive, process_start, relative)
 from .snapshot import capture
 from . import efficiency, usage
 
@@ -205,7 +205,8 @@ class Engine:
 
     def new_verification_lock(self, ticket):
         pid = os.getpid()
-        return {'ticket': ticket, 'pid': pid, 'pid_start': process_start(pid), 'boot_id': boot_id(),
+        return {'ticket': ticket, 'pid': pid, 'pid_start': process_start(pid), 'uid': current_uid(),
+                'boot_id': boot_id(),
                 'started': now(), 'pgid': None, 'pgid_start': None, 'check': None}
 
     def verification_live(self, lock, run=None):
@@ -229,7 +230,7 @@ class Engine:
             started = lock.get('started')
             if not isinstance(started, (int, float)) or now() - started > timeout + LEGACY_LOCK_GRACE:
                 return False
-        return process_alive(lock.get('pid'), lock.get('pid_start'))
+        return process_alive(lock.get('pid'), lock.get('pid_start'), lock.get('uid'))
 
     def _kill_check_group(self, lock):
         """SIGKILL the recorded check group only if its leader is still the
@@ -238,7 +239,7 @@ class Engine:
         start = lock.get('pgid_start')
         if type(pgid) is not int or pgid <= 1 or start is None:
             return False
-        if lock.get('boot_id') != boot_id() or not process_alive(pgid, start):
+        if lock.get('boot_id') != boot_id() or not process_alive(pgid, start, lock.get('uid')):
             return False
         try:
             if os.getpgid(pgid) != pgid:

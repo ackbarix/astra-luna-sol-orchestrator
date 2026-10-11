@@ -355,9 +355,10 @@ class VerificationLockTests(EngineCase):
 
     def wait_dead(self, pid, start):
         deadline = time.monotonic() + 30
-        while process_alive(pid, start) and time.monotonic() < deadline:
+        uid = os.geteuid()  # verify and its checks run as this test's uid
+        while process_alive(pid, start, uid) and time.monotonic() < deadline:
             time.sleep(.05)
-        return not process_alive(pid, start)
+        return not process_alive(pid, start, uid)
 
     def assert_dead(self, pid, start, verify_proc=None):
         """wait_dead with a diagnostic message (platform process-state paths differ)."""
@@ -484,7 +485,6 @@ class ProcessIdentityFallbackTests(unittest.TestCase):
                 patch.object(common.os, 'kill', return_value=None), \
                 patch.object(common.subprocess, 'run', return_value=empty):
             self.assertEqual(common.process_info(4242), ('X', None))
-            self.assertFalse(common.process_alive(4242))
             self.assertFalse(common.process_alive(4242, 'Mon Oct 12 00:00:00 2026'))
             self.assertIsNone(common.process_start(4242))
         with patch.object(common.sys, 'platform', 'darwin'), patch.object(Path, 'read_bytes', no_proc), \
@@ -494,18 +494,43 @@ class ProcessIdentityFallbackTests(unittest.TestCase):
             self.assertIsNone(common.process_info(4242))
             self.assertTrue(common.process_alive(4242))
 
-    def test_pid_recycled_by_another_user_is_not_alive(self):
-        """EPERM means the pid belongs to another user: ALS processes always run
-        as the current user, so the recorded one has exited."""
+    def test_sandbox_hidden_live_owner_stays_alive(self):
+        """Codex Seatbelt can deny both signals and ps for a LIVE same-uid
+        process: never report it exited (that would release a live lock)."""
+        from als_harness import common
+
+        def no_proc(path):
+            raise FileNotFoundError(path)
+
+        empty = subprocess.CompletedProcess(['ps'], 1, b'', b'')
+        with patch.object(common.sys, 'platform', 'darwin'), patch.object(Path, 'read_bytes', no_proc), \
+                patch.object(common.os, 'kill', side_effect=PermissionError(1, 'EPERM')), \
+                patch.object(common.subprocess, 'run', return_value=empty):
+            self.assertIsNone(common.process_info(4242))
+            self.assertTrue(common.process_alive(4242, 'start', os.geteuid()))
+
+    def test_eperm_with_readable_info_uses_start_time(self):
+        """sudo/other uid: signals denied but /proc readable; start decides."""
+        from als_harness import common
+        with patch.object(common.os, 'kill', side_effect=PermissionError(1, 'EPERM')), \
+                patch.object(common, 'process_info', return_value=('S', 5459)):
+            self.assertTrue(common.process_alive(4242, 5459, os.geteuid()))
+            self.assertFalse(common.process_alive(4242, 9999, os.geteuid()))
+
+    def test_linux_pid_recycled_by_another_user_is_not_alive(self):
+        """Linux: EPERM plus unreadable /proc for an owner recorded with our uid
+        means another user's process holds the pid. Without a recorded uid
+        (legacy lock) or on other platforms it stays conservative."""
         from als_harness import common
 
         def no_proc(path):
             raise FileNotFoundError(path)  # e.g. hidepid hides other users
 
-        with patch.object(Path, 'read_bytes', no_proc), \
+        with patch.object(common.sys, 'platform', 'linux'), patch.object(Path, 'read_bytes', no_proc), \
                 patch.object(common.os, 'kill', side_effect=PermissionError(1, 'EPERM')):
-            self.assertFalse(common.process_alive(4242))
-            self.assertFalse(common.process_alive(4242, 5459))
+            self.assertFalse(common.process_alive(4242, 5459, os.geteuid()))
+            self.assertTrue(common.process_alive(4242, 5459))  # legacy lock: no uid
+            self.assertTrue(common.process_alive(4242, 5459, os.geteuid() + 1))  # recorded as another uid
 
 class TaskCheckConcurrencyTests(EngineCase):
     def test_task_check_runs_beside_read_only_and_other_run_writers(self):
