@@ -271,7 +271,8 @@ def check(content: str, state: dict) -> None:
     if state.get("mode") == "created":
         if sha(content) != state.get("sha256"):
             raise ValueError("Installer-created config edited; manual review required")
-        parse(content)
+        if tomllib is not None:  # bytes ALS wrote; parsing only re-validates them
+            parse(content)
     elif state.get("mode") == "merged":
         restored = restore(content, state)
         if state.get("format", 1) >= 2:

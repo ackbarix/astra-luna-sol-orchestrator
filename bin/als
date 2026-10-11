@@ -13,7 +13,7 @@ Usage: als COMMAND [ARGS]
   doctor [--no-probe] [--json]         check dependencies, then the harness in this project
   run [CODEX ARGS]                     start Codex (`codex --profile als` when installed globally)
   plan new FILE                        write a minimal plan JSON template
-  usage [ARGS]                         token usage report (usage.sh)
+  usage [ARGS]                         token usage report for this project (token_usage.py)
   status|start|prepare|finish|verify|complete|report|resume|... [ARGS]
                                        harness commands for the current project
   version                              print the ALS version
@@ -42,9 +42,14 @@ need_python() {
 }
 
 # Main repository root (shared by worktrees), else the current directory.
+# The common dir's parent is the main checkout only when the common dir is a
+# .git directory; a submodule (.git/modules/NAME) uses its top level instead.
 project_root() {
  common=$(git rev-parse --git-common-dir 2>/dev/null) || { pwd -P; return 0; }
- (CDPATH= cd -- "$common/.." && pwd -P)
+ case $common in
+  .git|*/.git) (CDPATH= cd -- "$common/.." && pwd -P) ;;
+  *) git rev-parse --show-toplevel 2>/dev/null || pwd -P ;;
+ esac
 }
 
 # Harness for the current project: project-local install first, then global.
@@ -114,7 +119,8 @@ plan_new() {
   "budget": {"tokens": 0, "seconds": 0}
 }
 PLAN
- printf 'Wrote %s. Edit it, then: als prepare --plan %s > prepared.json\n' "$file" "$file"
+ printf 'Wrote %s. Edit %s, then run:\n  als prepare --plan %s > prepared.json\n  als start --plan prepared.json\n' \
+  "$file" "$file" "$file"
 }
 
 doctor() {
@@ -134,14 +140,30 @@ doctor() {
  else pkg=$release
  fi
  rc=0
- PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe $json || rc=$?
- if h=$(harness) && { [ -d "$root/.git" ] || [ -f "$root/.astra-luna-sol/harness.py" ]; }; then
-  printf '\nHarness (%s):\n' "$root"
-  if [ -n "$json" ]; then
-   "$py" "$h" --project "$root" doctor || rc=$?
-  else
-   "$py" "$h" --project "$root" doctor --format text || rc=$?
+ harness_ok=
+ if h=$(harness) && { [ -d "$root/.git" ] || [ -f "$root/.git" ] || [ -f "$root/.astra-luna-sol/harness.py" ]; }; then
+  harness_ok=1
+ fi
+ if [ -n "$json" ]; then
+  # One JSON object on stdout: {"deps": ..., "harness": ... or null}.
+  deps_out=$(PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe --json) || rc=$?
+  harness_out=
+  if [ -n "$harness_ok" ]; then
+   harness_out=$("$py" "$h" --project "$root" doctor) || rc=$?
   fi
+  "$py" -c 'import json, sys
+def load(text):
+    try:
+        return json.loads(text) if text.strip() else None
+    except ValueError:
+        return {"error": "unparseable output", "output": text[:2000]}
+print(json.dumps({"deps": load(sys.argv[1]), "harness": load(sys.argv[2])}, indent=2))' "$deps_out" "$harness_out" || rc=2
+  return "$rc"
+ fi
+ PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe || rc=$?
+ if [ -n "$harness_ok" ]; then
+  printf '\nHarness (%s):\n' "$root"
+  "$py" "$h" --project "$root" doctor --format text || rc=$?
  fi
  return "$rc"
 }

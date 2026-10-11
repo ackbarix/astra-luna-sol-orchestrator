@@ -365,7 +365,7 @@ class SmallFixTests(base.Sandbox, unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('NOTICE', result.stderr)
         command = json.loads((self.p / '.codex/hooks.json').read_text())['hooks']['Stop'][0]['hooks'][0]['command']
-        self.assertTrue(command.startswith(shlex.quote(os.path.abspath(sys.executable)) + ' '))
+        self.assertTrue(command.endswith('exec ' + shlex.quote(os.path.abspath(sys.executable)) + ' "$s" hook'))
         self.assertEqual(self.manifest()['interpreter'], os.path.abspath(sys.executable))
         check = subprocess.run([sys.executable, str(ROOT / 'install.py'), '--target', str(self.p), '--check'],
                                capture_output=True, text=True, env=env)

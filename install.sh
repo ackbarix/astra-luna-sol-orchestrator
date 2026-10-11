@@ -22,6 +22,8 @@ Usage:
   --check            exit 0 ok, 1 not installed, 2 drift/refused, 4 outdated
   --uninstall        remove ALS files (missing ones are fine; modified ones refuse)
   --force-uninstall  back up drifted files to backup-<UTC>/, then remove managed paths
+
+Environment: ALS_PYTHON (default python3; Python 3.9+, project config merges need 3.11+ or tomli)
 USAGE
 }
 if [ "$#" -eq 0 ]; then
@@ -31,12 +33,13 @@ fi
 case $1 in
  -h|--help) usage; exit 0 ;;
 esac
-if ! command -v python3 >/dev/null 2>&1; then
- printf '%s\n' 'REFUSED: python3 (3.11+) not found on PATH; install it and retry' >&2
+py=${ALS_PYTHON:-python3}
+if ! command -v "$py" >/dev/null 2>&1; then
+ printf 'REFUSED: %s (Python 3.9+) not found on PATH; install it or set ALS_PYTHON=/path/to/python3\n' "$py" >&2
  exit 2
 fi
 case $1 in
- --global) shift; exec python3 "$here/install.py" --global "$@" ;;
+ --global) shift; exec "$py" "$here/install.py" --global "$@" ;;
  -*) usage >&2; exit 2 ;;
 esac
 target=$1
@@ -45,4 +48,4 @@ case $target in
  *[![:space:]]*) ;;
  *) printf '%s\n' 'REFUSED: empty project path' >&2; usage >&2; exit 2 ;;
 esac
-exec python3 "$here/install.py" --target "$target" "$@"
+exec "$py" "$here/install.py" --target "$target" "$@"

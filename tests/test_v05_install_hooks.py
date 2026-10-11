@@ -16,8 +16,9 @@ class HookGroupTests(unittest.TestCase):
         self.assertEqual(set(groups), set(integration.HOOK_EVENTS))
         for event, group in groups.items():
             command = group['hooks'][0]['command']
-            self.assertEqual(command, 'python3 "$(cd "$(git rev-parse --git-common-dir)/.." && pwd)'
-                                      '/.astra-luna-sol/harness.py" hook')
+            self.assertEqual(command, integration.PROJECT_RESOLVE + 'exec python3 "$s" hook')
+            self.assertIn('CDPATH= cd -- ', command)
+            self.assertIn('[ -f "$s" ] || exit 0', command)
             self.assertNotIn('--path-format', command)
             self.assertNotIn('--project', command)
 
@@ -32,9 +33,9 @@ class HookGroupTests(unittest.TestCase):
 
     def test_global_command_home_relative_and_quoted(self):
         self.assertEqual(integration.home_command('/h/u/.local/share/als', home='/h/u'),
-                         'python3 "$HOME/.local/share/als/harness.py" hook')
+                         'python3 "${HOME:-/h/u}/.local/share/als/harness.py" hook')
         odd = integration.home_command('/h/u/a "b" $c`d', home='/h/u')
-        self.assertEqual(odd, 'python3 "$HOME/a \\"b\\" \\$c\\`d/harness.py" hook')
+        self.assertEqual(odd, 'python3 "${HOME:-/h/u}/a \\"b\\" \\$c\\`d/harness.py" hook')
         argv = subprocess.run(['sh', '-c', odd.replace('python3', 'printf %s', 1)[:-len(' hook')]],
                               capture_output=True, text=True, env={'HOME': '/h/u'}).stdout
         self.assertEqual(argv, '/h/u/a "b" $c`d/harness.py')
@@ -45,7 +46,7 @@ class HookGroupTests(unittest.TestCase):
 
     def test_interpreter_override_is_quoted(self):
         cmd = integration.command('project', python='/opt/py 3/bin/python3')
-        self.assertTrue(cmd.startswith("'/opt/py 3/bin/python3' "))
+        self.assertTrue(cmd.endswith("exec '/opt/py 3/bin/python3' \"$s\" hook"))
         self.assertTrue(integration.command('global', '/h/als', python='python3').startswith('python3 '))
         with self.assertRaises(HarnessError):
             integration.command('project', python='py')

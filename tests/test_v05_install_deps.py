@@ -22,6 +22,7 @@ class DepsTests(unittest.TestCase):
         self.patch.start()
         os.environ.pop('ALS_HOME', None)
         os.environ.pop('ALS_BIN_DIR', None)
+        os.environ.pop('ALS_DEPS_TIMEOUT', None)
         git = '/usr/bin/git' if os.path.exists('/usr/bin/git') else None
         if git:
             os.symlink(git, self.bin / 'git')
@@ -78,9 +79,9 @@ class DepsTests(unittest.TestCase):
 
     def test_render_and_timeout_handling(self):
         self.tool('codex', 'exec /bin/sleep 30\n')
-        with mock.patch.object(deps, 'TIMEOUT', 0.5):
-            items = self.items(deps.check(None, probe=True))
+        items = self.items(deps.check(None, probe=True, timeout=1))
         self.assertFalse(items['codex']['ok'])
+        os.environ['ALS_DEPS_TIMEOUT'] = '1'
         self.assertIn('[FAIL] codex', deps.render(deps.check(None, probe=False)))
 
 

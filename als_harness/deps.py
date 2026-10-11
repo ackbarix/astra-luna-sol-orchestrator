@@ -2,9 +2,10 @@
 
 Standard library only, Python 3.9+. Never calls a model: the only external
 programs run are `git --version`, `codex --version`, `codex features list`
-and `ocx --version`, each with a 10 second timeout.
+and `ocx --version`, each with a 10 second timeout (override with the
+`timeout` argument, `--timeout`, or the ALS_DEPS_TIMEOUT environment variable).
 
-    check(project=None, probe=True) -> {'ok': bool, 'items': [item, ...]}
+    check(project=None, probe=True, timeout=None) -> {'ok': bool, 'items': [item, ...]}
 
 Each item is {'name', 'found', 'required', 'ok', 'hint'}. 'ok' at the top is
 true when every required item is ok; optional items only carry hints.
@@ -33,9 +34,22 @@ def _item(name, found, ok, hint='', required=True):
     return {'name': name, 'found': found, 'required': required, 'ok': bool(ok), 'hint': '' if ok else hint}
 
 
+def default_timeout():
+    """Seconds per external probe: ALS_DEPS_TIMEOUT if valid, else TIMEOUT."""
+    try:
+        value = float(os.environ.get('ALS_DEPS_TIMEOUT', ''))
+    except ValueError:
+        return TIMEOUT
+    return value if value > 0 else TIMEOUT
+
+
+_timeout = None  # set by check() for the duration of one report
+
+
 def _run(argv):
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=TIMEOUT,
+        done = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=_timeout if _timeout is not None else default_timeout(),
                               stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as ex:
         return None, type(ex).__name__
@@ -173,9 +187,14 @@ def conflict_items(project=None):
     return items
 
 
-def check(project: Path | None = None, probe: bool = True) -> dict:
-    items = python_items() + [git_item(), sqlite_item()] + codex_items(probe) + [ocx_item(), bin_item()]
-    items += conflict_items(project)
+def check(project: Path | None = None, probe: bool = True, timeout: float | None = None) -> dict:
+    global _timeout
+    previous, _timeout = _timeout, (timeout if timeout and timeout > 0 else None)
+    try:
+        items = python_items() + [git_item(), sqlite_item()] + codex_items(probe) + [ocx_item(), bin_item()]
+        items += conflict_items(project)
+    finally:
+        _timeout = previous
     return {'ok': all(i['ok'] for i in items if i['required']), 'items': items}
 
 
@@ -196,8 +215,10 @@ def main(argv=None):
     ap.add_argument('--project', type=Path)
     ap.add_argument('--no-probe', action='store_true', help='skip `codex features list`')
     ap.add_argument('--json', action='store_true')
+    ap.add_argument('--timeout', type=float, default=None,
+                    help='seconds per external probe (default: $ALS_DEPS_TIMEOUT or 10)')
     args = ap.parse_args(argv)
-    result = check(args.project, not args.no_probe)
+    result = check(args.project, not args.no_probe, args.timeout)
     print(json.dumps(result, indent=2) if args.json else render(result))
     return 0 if result['ok'] else 1
 

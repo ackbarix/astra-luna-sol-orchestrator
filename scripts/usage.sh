@@ -6,7 +6,11 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 if [ "$(basename -- "$here")" = .astra-luna-sol ]; then
   project=$(dirname -- "$here")
 elif common=$(git rev-parse --git-common-dir 2>/dev/null); then
-  project=$(CDPATH= cd -- "$common/.." && pwd -P)
+  # Main checkout only when the common dir is .git; submodules use their top level.
+  case $common in
+    .git|*/.git) project=$(CDPATH= cd -- "$common/.." && pwd -P) ;;
+    *) project=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P) ;;
+  esac
 else
   project=$(pwd -P)
 fi
