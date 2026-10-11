@@ -94,7 +94,8 @@ def default_session(store, mode):
 
     $CODEX_THREAD_ID wins when set. Otherwise, in observe mode only, pick
     the session only when exactly one session receipt saw ANY hook event in
-    the last 10 minutes, and always warn naming it. Guarded mode never
+    the last 10 minutes (ended sessions included in that count) and its last
+    event was not SessionEnd, and always warn naming it. Guarded mode never
     auto-picks: it requires --session (or $CODEX_THREAD_ID).
     """
     env = os.environ.get('CODEX_THREAD_ID')
@@ -103,12 +104,18 @@ def default_session(store, mode):
     if mode == 'guarded':
         raise HarnessError('Guarded mode requires --session <session id>; it never picks a session automatically.')
     cutoff = now() - RECENT_SESSION_SECONDS
-    recent = []
+    recent, ended = [], []
     for row in store.db.execute('SELECT id,doc FROM sessions'):
         doc = json.loads(row['doc'])
         last = doc.get('last_event', doc.get('session_start_at'))
         if isinstance(last, (int, float)) and last >= cutoff:
             recent.append(row['id'])
+            if isinstance(doc.get('ended_at'), (int, float)):
+                ended.append(row['id'])
+    if len(recent) == 1 and ended:
+        return None, None, ('No --session given and the only session with hook activity in the last 10 minutes ('
+                            + recent[0] + ') has ended; cannot pick the session safely. Observe run started'
+                            ' without a session; usage/hook linkage disabled.')
     if len(recent) == 1:
         return recent[0], 'recent_session_start', (
             'No --session given; picked session ' + recent[0] + ', the only session with hook activity in the'
@@ -197,7 +204,7 @@ def doctor_text(result):
         if item.get('hint'):
             line += ' -> ' + str(item['hint'])
         problems.append(line)
-    if result.get('deps', {}).get('ok') is None:
+    if 'deps' in result and result['deps'].get('ok') is None:
         lines.append('deps:   not checked (' + str(result.get('deps', {}).get('note')) + ')')
     failed = sum(p.startswith('FAIL') for p in problems)
     warned = len(problems) - failed
@@ -209,7 +216,12 @@ def doctor_text(result):
     return '\n'.join(lines + problems)
 
 
-def doctor(project, store, probe=False, scope='project', deps_probe=True):
+def doctor(project, store, probe=False, scope='project', deps_probe=True, with_deps=True):
+    """Hook/state report plus the embedded dependency check.
+
+    with_deps=False (`--no-deps`) omits the 'deps' section entirely, for
+    callers such as bin/als that already ran deps.check() themselves; the
+    exit code then reflects only usage/state errors."""
     issues = []
     checked, found_in, configured = [], {}, set()
     for path in hooks_files(project):
@@ -244,7 +256,8 @@ def doctor(project, store, probe=False, scope='project', deps_probe=True):
               'paid_model_calls': False, 'hook_trust_verified': False, 'blocking_behavior_verified': False,
               'note': 'Review/trust with /hooks. Observed callbacks and fixtures are not an end-to-end proof'
                       ' of installed Codex enforcement.'}
-    result['deps'] = dependency_report(project, deps_probe)
+    if with_deps:
+        result['deps'] = dependency_report(project, deps_probe)
     if probe:
         result['probes'] = {}
         for key, cmd in {'version': ['codex', '--version'], 'features': ['codex', 'features', 'list']}.items():
@@ -280,7 +293,11 @@ def parser():
                                              ' fails, 2 on a usage or state error.')
     d.add_argument('--probe', action='store_true', help='Also run `codex --version` / `codex features list`.')
     d.add_argument('--no-probe', action='store_true',
-                   help='Do not run external probes in the dependency check (deps.check(probe=False)).')
+                   help='Dependency check without `codex features list` (the codex-feature items are omitted);'
+                        ' `codex --version`, `git --version` and `ocx --version` still run once.')
+    d.add_argument('--no-deps', action='store_true',
+                   help='Skip the embedded dependency check entirely (no "deps" section, no external programs'
+                        ' unless --probe); for callers that already ran it.')
     d.add_argument('--format', choices=['json', 'text'], default='json')
     sub.add_parser('hook')
     status = sub.add_parser('status', help='Unfinished runs (all with --all), or one run with --run.')
@@ -423,7 +440,7 @@ def dispatch(args, store):
             out['warnings'] = [problem]
             print('ALS WARNING: ' + problem, file=sys.stderr)
     elif args.cmd == 'doctor':
-        out = doctor(store.project, store, args.probe, args.scope, not args.no_probe)
+        out = doctor(store.project, store, args.probe, args.scope, not args.no_probe, not args.no_deps)
         code = out['exit_code']
     elif args.cmd == 'status':
         if args.run:
@@ -518,7 +535,12 @@ def offline(args, project):
 
 def emit(args, out):
     if getattr(args, 'format', 'json') == 'text':
-        text = doctor_text(out) if args.cmd == 'doctor' else status_text(out) if args.cmd == 'status' else None
+        if args.cmd == 'doctor':
+            text = doctor_text(out)
+        elif args.cmd == 'status':
+            text = status_text(out) if 'runs' in out else report.run_text(out)
+        else:
+            text = None
         if text is not None:
             print(text)
             return
@@ -548,7 +570,7 @@ def main(argv=None):
         if args.cmd in ('status', 'doctor') and not state_path(project, args.scope).exists():
             code = 0
             if args.cmd == 'doctor':
-                out = doctor(project, None, args.probe, args.scope, not args.no_probe)
+                out = doctor(project, None, args.probe, args.scope, not args.no_probe, not args.no_deps)
                 code = out['exit_code']
             else:
                 out = {'runs': [], 'note': 'No managed runs registered', 'next': 'harness.py start --plan <plan.json>'}

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import re
 import shlex
+import shutil
+import sys
 from .common import ACTIVE, HarnessError, digest, ident, now
 from .engine import Engine
 from . import usage
@@ -74,10 +76,15 @@ def linked_run(store, sid, agent):
 
 
 def record_receipt(store, sid, event, payload):
-    """Session receipt; skips the write transaction when nothing would change."""
+    """Session receipt; skips the write transaction when nothing would change.
+
+    'ended_at' is set by SessionEnd and cleared by any later event, so a
+    receipt whose last event was SessionEnd is recognisable (session
+    auto-pick skips it). SessionStart/SessionEnd always write."""
     receipt = store.get('sessions', sid)
     last = (receipt or {}).get('last_event')
-    if (receipt is not None and event in receipt.get('seen', []) and event != 'SessionStart'
+    if (receipt is not None and event in receipt.get('seen', []) and event not in ('SessionStart', 'SessionEnd')
+            and not receipt.get('ended_at')
             and isinstance(last, (int, float)) and now() - last < RECEIPT_REFRESH_SECONDS):
         # last_event (session auto-pick activity) stays fresh to within a minute.
         return receipt
@@ -85,6 +92,10 @@ def record_receipt(store, sid, event, payload):
         receipt = store.get('sessions', sid) or {'seen': [], 'transcripts': []}
         receipt['seen'] = sorted(set(receipt['seen']) | {event})
         receipt['last_event'] = now()
+        if event == 'SessionEnd':
+            receipt['ended_at'] = receipt['last_event']
+        else:
+            receipt.pop('ended_at', None)
         if event == 'SessionStart':
             receipt['session_start_at'] = receipt['last_event']
             if isinstance(payload.get('source'), str):
@@ -113,11 +124,21 @@ def harness_script():
     return installed if installed.is_file() else home / 'scripts/harness.py'
 
 
+def harness_invocation():
+    """Absolute, quoted `<interpreter> <harness.py>` for this install.
+
+    Uses the interpreter running the hook (the one recorded at install time
+    when the hook command names an absolute python), and an absolute harness
+    path, so the command works from any subdirectory or linked worktree."""
+    return shlex.quote(sys.executable or 'python3') + ' ' + shlex.quote(str(harness_script()))
+
+
 def cli_hint(store):
-    """How the user/HEAD invokes the harness for this store's scope."""
-    if getattr(store, 'scope', 'project') == 'global':
+    """How the user/HEAD invokes the harness for this store's scope: `als`
+    in global scope or whenever `als` is on PATH, else harness_invocation()."""
+    if getattr(store, 'scope', 'project') == 'global' or shutil.which('als'):
         return 'als'
-    return 'python3 .astra-luna-sol/harness.py'
+    return harness_invocation()
 
 
 def resume_command(store, run, sid):
@@ -126,7 +147,7 @@ def resume_command(store, run, sid):
         # `als` resolves the project from the current repository.
         argv = ['als', 'resume', '--run', run['id'], '--session', sid]
     else:
-        argv = ['python3', str(harness_script()), '--project', str(store.project), 'resume', '--run', run['id'],
+        argv = [sys.executable or 'python3', str(harness_script()), '--project', str(store.project), 'resume', '--run', run['id'],
                 '--session', sid]
     if any(t['status'] in ACTIVE or t.get('claims_held') for t in store.tasks(run['id'])):
         argv.append('--workers-stopped')

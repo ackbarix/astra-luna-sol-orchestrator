@@ -43,14 +43,30 @@ def nested_head(path: Path) -> str:
     return stable_name(value)
 
 
+def bytecode_cache(raw: bytes) -> bool:
+    """True for Python bytecode caches: anything under a `__pycache__/`
+    directory, or a `*.pyc` / `*.pyo` file."""
+    parts = raw.rstrip(b'/').split(b'/')
+    return b'__pycache__' in parts or parts[-1].endswith((b'.pyc', b'.pyo'))
+
+
 def capture(project: Path):
+    """Fingerprint tracked files plus nonignored untracked files.
+
+    UNTRACKED Python bytecode caches (bytecode_cache) are excluded: running
+    a Python check writes them into repositories that do not ignore them,
+    which would otherwise fail the first verify with
+    code_changed_during_check. Tracked .pyc files stay fingerprinted.
+    """
     root = Path(os.fsdecode(git(project, 'rev-parse', '--show-toplevel').strip())).resolve()
     if root != project.resolve():
         raise HarnessError('Manage the Git worktree root, not a nested project directory')
     # Tracked files plus nonignored untracked files. Runtime evidence excluded.
     # An untracked nested repository is listed once as 'dir/'.
-    listed = git(project, 'ls-files', '-z', '--cached', '--others', '--exclude-standard').split(b'\0')
-    paths = {raw.rstrip(b'/') for raw in listed} - {b''}
+    tracked = git(project, 'ls-files', '-z', '--cached').split(b'\0')
+    others = git(project, 'ls-files', '-z', '--others', '--exclude-standard').split(b'\0')
+    paths = ({raw.rstrip(b'/') for raw in tracked}
+             | {raw.rstrip(b'/') for raw in others if not bytecode_cache(raw)}) - {b''}
     if len(paths) > MAX_FILES:
         raise HarnessError('Snapshot file limit exceeded; no completion certification')
     records = []

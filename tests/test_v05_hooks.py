@@ -229,7 +229,11 @@ class ScopeHintTests(unittest.TestCase):
         self.assertNotIn('harness.py', text)
 
     def test_project_scope_names_installed_harness(self):
-        self.assertIn('python3 .astra-luna-sol/harness.py start', self.start_text('project'))
+        # Without `als` on PATH: the absolute harness path and the running interpreter.
+        with patch.object(hooks.shutil, 'which', return_value=None):
+            text = self.start_text('project')
+        self.assertIn(hooks.harness_invocation() + ' start', text)
+        self.assertNotIn('python3 .astra-luna-sol/harness.py', text)
 
     def test_global_resume_command_uses_als(self):
         store = Store(self.project, scope='global')
