@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.5.0 — global install, `als` command, recovery and state-engine fixes
+
+### Install and use
+- `sh setup.sh` from a clone installs globally and puts `als` in `~/.local/bin`; it prints
+  the PATH line and never edits shell rc files or `$CODEX_HOME/config.toml`.
+- Global layout: harness in `${ALS_HOME:-~/.local/share/als}`, roles in
+  `$CODEX_HOME/agents/als_*.toml`, skill in `$CODEX_HOME/skills/astra-luna-sol/`, model
+  defaults in `$CODEX_HOME/als.config.toml` (`codex --profile als` / `als run`).
+- Per-project hooks are opt-in: `cd PROJECT && als install --hooks-only`. Project mode
+  (`als install PROJECT` / `sh install.sh PROJECT`) is unchanged in purpose.
+- Hook commands are relocatable (no absolute project path) and PreToolUse/PostToolUse
+  match only `spawn_agent`.
+- New `als` subcommands: `install`, `uninstall`, `doctor`, `run`, `plan new`, `usage`,
+  `version`, and passthrough of every harness command for the current repository.
+- Global-scope state lives in `${XDG_STATE_HOME:-~/.local/state}/als/<hash>/`, keeping
+  repositories clean.
+
+### Dependencies
+- Runtime floor is Python 3.9. The installer needs 3.11+ (or `tomli`) only to merge a
+  project `config.toml`; `--global` needs no TOML parser.
+- No `git --path-format`, so older git works.
+- `als doctor` checks python, git, sqlite3, codex and its `hooks`/`multi_agent` features,
+  optional `ocx`, PATH, and project/global conflicts; text by default, `--json` for JSON.
+- If `python3` on PATH is missing or older than 3.9, hooks record the installer's absolute
+  interpreter.
+
+### Recovery
+- `--uninstall` succeeds when managed files are already missing; `--force-uninstall`
+  backs up drifted files to `backup-<UTC>/` first; `--adopt` reclaims manifest-less
+  byte-identical files; `--policy-file PATH` chooses the policy file.
+- `--check` exit codes: 0 ok, 1 not installed, 2 drift/refused, 4 outdated.
+- `hooks.json` is restored byte-exact on uninstall/rollback.
+
+### State engine
+- `cancel` releases claims; stale or killed verification locks are detected and cleared,
+  and a check process group is killed only when it is still our exact process.
+- `resume` keeps finished (`awaiting_validation`) work and refreshes `last_snapshot`, so
+  `--accept-drift` is rarely needed; `retry` clears the previous result.
+- Completed runs never flip back to running/blocked.
+- Nested repositories, gitlinks and non-UTF-8 file names no longer break snapshots; claim
+  release no longer needs a snapshot.
+- Task-level checks may run while other runs are active, provided this run holds no write
+  claim. `.codex` is a reserved path. Redaction covers more secret shapes.
+
+### Hooks and usage
+- Child-origin spawns are denied (guarded) or warned (observe); forked-worktree child
+  events are kept; deny reasons are never empty; unchanged receipts are not rewritten;
+  `bind` failures are surfaced.
+- Oversized rollout lines are skipped with a warning; unbound threads keep their usage;
+  session_meta is stored minimally; truncation is detected; the sessions base is stored.
+- After a SessionEnd pause the SessionStart context prints the exact resume command.
+- `start --plan -` reads stdin; `--session` is auto-detected from exactly one recent
+  SessionStart receipt; `status --format text`.
+
+### Policy and reporters
+- `token_usage.py`: lineage-scoped warnings with unrelated files in `index_warnings`,
+  robust identity coercion, `--day` skips threads idle on that day, `--cwd` includes
+  subdirectories, new `--include-archived`.
+- Profile caps are real caps; exact duplicate signatures include checks, constraints,
+  risk, complexity and role.
+- History calibration counts failures as failures and uses counted tokens.
+- `check-runtime.py` judges only the selected lineage and has a minimal TOML fallback.
+
+### Profiles and CI
+- `als_test_designer` and `als_reviewer_deep` rewritten with their own mandates; read-only
+  is stated as an instruction (subagents inherit the parent sandbox); shorter AGENTS snippet.
+- CI: ubuntu/macOS × Python 3.11/3.14, a Python 3.9 runtime-only job, dash/sh/bash syntax
+  checks and install/setup end-to-end tests.
+
+### Breaking or behaviour changes
+- `setup.sh`/`--global` is the recommended install; a 0.2–0.4 project install alongside a
+  global one shadows the global roles (`als doctor` warns: `conflict:agent-roles`).
+- Soft token budgets and history estimates count **uncached input + output** (cached input
+  no longer counts), so the same budget admits more work than in 0.4.
+- Run reports are `schema_version` 2; `analyze --report-file` accepts 1 or 2 (with `workers`).
+- Read-only kinds (exploration, research, review) never route to write-capable roles;
+  complex/high-risk ones get a `recommend_escalation` note instead.
+- Caller `efficiency.max_*` values can only lower profile caps; `validate` rejects edited
+  prepared plans above them.
+- Plans that contain runtime-only task keys are rejected; `.codex/...` cannot be a write path.
+- Child agents may not spawn agents (denied in guarded mode).
+- Hook PreToolUse/PostToolUse groups now match only `spawn_agent`.
+
+### Not validated
+- No paid model or live Codex session was run for this release. Tests use synthetic logs,
+  temporary Git projects and local commands; no performance or savings claim is made.
+
 ## 0.4.0 — bounded delegation, context contracts and reviewed calibration
 
 - Add versioned opt-in plan preparation: trivial low-risk tasks run directly in HEAD;
