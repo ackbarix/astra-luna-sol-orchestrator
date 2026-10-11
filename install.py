@@ -703,17 +703,24 @@ def project_mode(args) -> int:
 
     next_hooks = None
     python = state.get("interpreter", hook_config.DEFAULT_PYTHON)
+    base_hooks = restored_hooks if hooks_state else before_hooks
+    try:
+        global_handler = base_hooks is not None and hook_config.has_global_handler(hook_config.parse(base_hooks))
+    except ValueError:
+        if not args.skip_hooks:
+            raise
+        global_handler = False  # --skip-hooks leaves an unparseable user hooks.json alone
+    # Every project install (with or without --skip-hooks): global-harness
+    # hooks would keep logging to the global state, never to this project's DB.
+    if hooks_only_registered(target) or global_handler:
+        raise Refused("This project has --hooks-only ALS hooks that call the global harness. In " + t
+                      + " run `als uninstall --hooks-only` first, then rerun the project install.")
     if args.skip_hooks:
         hooks_data = restored_hooks
     else:
         if config_overlay.parse(text(before_config)).get("hooks"):
             raise Refused("Inline Codex hooks already exist in " + CONFIG + "; reconcile them or install without "
                           "hooks: " + installer_command(t, "--skip-hooks"))
-        base_hooks = restored_hooks if hooks_state else before_hooks
-        if hooks_only_registered(target) or (base_hooks is not None and hook_config.has_global_handler(
-                hook_config.parse(base_hooks))):
-            raise Refused("This project has --hooks-only ALS hooks that call the global harness. In " + t
-                          + " run `als uninstall --hooks-only` first, then rerun the project install.")
         python = hook_python()
         hooks_data, next_hooks = hook_config.merge(base_hooks, None, "project", None, python)
         git_warning(target)
@@ -900,6 +907,32 @@ def global_homes() -> tuple[Path, Path, Path]:
 GLOBAL_MANIFEST = "ALS_HOME/manifest.json"
 
 
+def configured_python() -> str:
+    """Absolute ALS_PYTHON from the environment, or '' for the python3 default."""
+    value = os.environ.get("ALS_PYTHON", "")
+    if not value or value == hook_config.DEFAULT_PYTHON:
+        return ""
+    found = value if os.sep in value else shutil.which(value)
+    if not found:
+        raise Refused("ALS_PYTHON=" + value + " not found on PATH")
+    return os.path.abspath(found)
+
+
+def entrypoint(data: bytes, als_home: Path) -> bytes:
+    """bin/als with this install's ALS_HOME and interpreter recorded as defaults.
+
+    The environment still overrides both at run time; a clone's bin/als keeps
+    the empty placeholders.
+    """
+    out = data.decode("utf-8")
+    for name, value in (("ALS_DEFAULT_HOME", str(als_home)), ("ALS_DEFAULT_PYTHON", configured_python())):
+        line = "\n" + name + "=\n"
+        if out.count(line) != 1:
+            raise ValueError("Incomplete release: bin/als lacks the " + name + "= placeholder")
+        out = out.replace(line, "\n" + name + "=" + (shlex.quote(value) if value else "") + "\n")
+    return out.encode("utf-8")
+
+
 def global_mode(args) -> int:
     als_home, codex_home, bin_dir = global_homes()
     layout = Layout({"ALS_HOME": als_home, "CODEX_HOME": codex_home, "BIN": bin_dir})
@@ -921,6 +954,7 @@ def global_mode(args) -> int:
     if set(state["files"]) - set(src):
         raise Refused("Manifest includes unknown managed paths; manual review required")
     desired = {key: path.read_bytes() for key, path in src.items()}
+    desired["BIN/als"] = entrypoint(desired["BIN/als"], als_home)
     missing, modified = classify(session, state["files"])
     projects = state.get("hooks_projects", {})
     if args.check:

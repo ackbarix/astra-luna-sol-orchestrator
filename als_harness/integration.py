@@ -28,12 +28,16 @@ SPAWN_MATCHER = 'spawn_agent'
 MATCHED_EVENTS = {'PreToolUse', 'PostToolUse'}
 # Portable to old git (no --path-format): --git-common-dir may be relative to
 # the cwd, so resolve it with cd/pwd. Works from subdirectories and worktrees.
+# Git < 2.13 prints a relative common dir relative to the top level even from a
+# subdirectory; a relative path that does not exist from the cwd is therefore
+# resolved against ``--show-cdup``.
 # The common dir's parent is the main checkout only when the common dir is a
 # ``.git`` directory; in a submodule (.git/modules/NAME) use the top level, like
 # cli.git_project. CDPATH is cleared so an exported CDPATH cannot redirect or
 # pollute the ``cd``. A missing harness (fresh clone, submodule without ALS,
 # no repository) exits 0 silently so it never blocks a tool call.
 PROJECT_RESOLVE = ('c=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0; '
+                   'case $c in /*) ;; *) [ -d "$c" ] || c=$(git rev-parse --show-cdup 2>/dev/null)$c ;; esac; '
                    'case $c in .git|*/.git) r=$(CDPATH= cd -- "$c/.." && pwd) ;; '
                    '*) r=$(git rev-parse --show-toplevel 2>/dev/null) ;; esac || exit 0; '
                    's=$r/.astra-luna-sol/harness.py; [ -f "$s" ] || exit 0; ')

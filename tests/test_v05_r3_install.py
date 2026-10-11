@@ -333,9 +333,9 @@ class ResolutionTests(R3Sandbox, unittest.TestCase):
         for name in ('usage.sh', 'run.sh'):
             (tools / name).write_bytes((ROOT / 'scripts' / name).read_bytes())
         (tools / 'token_usage.py').write_text('import sys\nprint(*sys.argv[1:])\n')
-        usage = subprocess.run(['bash', str(tools / 'usage.sh')], cwd=mod / 'deep', capture_output=True, text=True,
-                               env=self.env)
-        self.assertEqual(usage.stdout.split(), ['--cwd', os.path.realpath(mod)], usage.stderr)
+        usage = subprocess.run(['bash', str(tools / 'usage.sh'), '--list'], cwd=mod / 'deep', capture_output=True,
+                               text=True, env=self.env)
+        self.assertEqual(usage.stdout.split(), ['--cwd', os.path.realpath(mod), '--list'], usage.stderr)
         (self.base / 'fakebin/codex').write_text('#!/bin/sh\npwd -P\n')
         run = subprocess.run(['bash', str(tools / 'run.sh')], cwd=mod / 'deep', capture_output=True, text=True,
                              env=dict(self.env, CDPATH=str(self.p)))
