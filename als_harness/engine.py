@@ -20,6 +20,9 @@ RUNTIME_TASK_KEYS = {'executor', 'claims_held', 'accepted_snapshot', 'attempts',
 # High-risk retries may move to these roles; read-only kinds may also stay read-only.
 STRONG_RETRY_ROLES = {'als_hard_worker', 'als_reviewer_deep'}
 READ_ONLY_KINDS = {'exploration', 'research'}
+# Age limit for legacy verification locks without a recorded process start.
+LEGACY_LOCK_TIMEOUT = 3600
+LEGACY_LOCK_GRACE = 60
 
 
 def validate_plan(plan):
@@ -172,13 +175,27 @@ class Engine:
         return {'ticket': ticket, 'pid': pid, 'pid_start': process_start(pid), 'boot_id': boot_id(),
                 'started': now(), 'pgid': None, 'pgid_start': None, 'check': None}
 
-    def verification_live(self, lock):
+    def verification_live(self, lock, run=None):
         """A lock is live while its verify process exists with the recorded
         start time in the same boot. Missing pids, recycled pids and locks
-        from an earlier boot are stale."""
+        from an earlier boot are stale.
+
+        A legacy (0.4) lock has no pid_start, so a recycled pid would keep it
+        live forever: it is also stale once older than its check's timeout
+        (3600 s when the check is unknown) plus 60 s.
+        """
         current_boot = boot_id()
         if lock.get('boot_id') and current_boot and lock['boot_id'] != current_boot:
             return False
+        if lock.get('pid_start') is None:
+            timeout = LEGACY_LOCK_TIMEOUT
+            checks = (run or {}).get('plan', {}).get('checks', [])
+            for check in checks:
+                if check.get('id') == lock.get('check') and type(check.get('timeout')) is int:
+                    timeout = check['timeout']
+            started = lock.get('started')
+            if not isinstance(started, (int, float)) or now() - started > timeout + LEGACY_LOCK_GRACE:
+                return False
         return process_alive(lock.get('pid'), lock.get('pid_start'))
 
     def _kill_check_group(self, lock):
@@ -223,7 +240,7 @@ class Engine:
             if run['status'] in TERMINAL:
                 self.release_verification(run, 'run is ' + run['status'])
                 self.s.save_run(run)
-            elif self.verification_live(lock):
+            elif self.verification_live(lock, run):
                 live.append(run)
             else:
                 self.release_verification(run, 'verify process no longer running')
@@ -627,7 +644,7 @@ class Engine:
                 raise HarnessError('Worktree/HEAD differs: inspect changes, then --accept-drift')
             active = [t for t in self.s.tasks(rid) if t['status'] in ACTIVE]
             lock = run.get('verification')
-            if lock and not self.verification_live(lock):
+            if lock and not self.verification_live(lock, run):
                 self.release_verification(run, 'verify process no longer running')
             if (active or run.get('verification')) and not workers_stopped:
                 raise HarnessError('Confirm old workers/verification process stopped; no automatic duplicate dispatch')

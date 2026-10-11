@@ -7,11 +7,27 @@ import signal
 import subprocess
 import time
 import uuid
-from .common import ACTIVE, HarnessError, checked_path, digest, now, process_start, redact
+from .common import ACTIVE, HarnessError, checked_path, digest, now, process_info, process_start, redact
 from .engine import holds_claim
 from .snapshot import capture
 
 MAX_LOG = 65536
+
+
+def leader_exited(pid):
+    """True once the group leader has exited, WITHOUT reaping it.
+
+    An unreaped leader (zombie) keeps its pid, so the process group id cannot
+    be recycled before our final killpg. Uses waitid(WNOWAIT) where
+    available, else the process state (zombie/absent)."""
+    waitid = getattr(os, 'waitid', None)
+    if waitid is not None and hasattr(os, 'WNOWAIT'):
+        try:
+            return waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            return True
+    info = process_info(pid)
+    return info is None or info[0] in ('Z', 'X')
 
 
 def execute(argv, project, timeout, on_spawn=None):
@@ -43,16 +59,19 @@ def execute(argv, project, timeout, on_spawn=None):
                 space = MAX_LOG - len(data)
                 data.extend(chunk[:max(0, space)])
                 truncated |= len(chunk) > space
-        if not expired:
-            try:
-                proc.wait(timeout=max(.01, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
+        # Wait for the leader without reaping it (see leader_exited).
+        while not expired and not leader_exited(proc.pid):
+            if time.monotonic() >= deadline:
                 expired = True
+                break
+            time.sleep(.01)
     finally:
-        # Child descendants belong to this new group; never kill arbitrary workers.
+        # Child descendants belong to this new group; never kill arbitrary
+        # workers. The leader is still unreaped here, so proc.pid is still
+        # our group id: kill first, reap second.
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         proc.wait()
         selector.close()
