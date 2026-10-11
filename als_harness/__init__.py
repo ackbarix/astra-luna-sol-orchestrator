@@ -1,2 +1,2 @@
-"""ALS 0.3: local cooperative execution harness. Not a security boundary."""
-__version__ = "0.3.0"
+"""ALS 0.4: cost-aware cooperative execution harness. Not a security boundary."""
+__version__ = "0.4.0"
