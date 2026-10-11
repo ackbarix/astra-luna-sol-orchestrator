@@ -35,9 +35,14 @@ def execute(argv, project, timeout, on_spawn=None):
 
     on_spawn(proc) runs before any waiting so the caller can persist the new
     process group; if it raises, the group is killed and the error propagates.
+
+    Checks run with PYTHONDONTWRITEBYTECODE=1 so Python checks do not write
+    __pycache__ into the worktree (snapshot.capture also ignores untracked
+    bytecode caches; this is the second layer).
     """
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
     proc = subprocess.Popen(argv, cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            stdin=subprocess.DEVNULL, start_new_session=True)
+                            stdin=subprocess.DEVNULL, start_new_session=True, env=env)
     data = bytearray()
     truncated = False
     expired = False
