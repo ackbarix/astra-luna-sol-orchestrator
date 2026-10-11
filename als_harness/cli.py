@@ -1,35 +1,152 @@
 """User/HEAD CLI; no model dispatch, implicit retries or background processes."""
 from __future__ import annotations
 import argparse
+import inspect
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
-from .common import HarnessError, checked_path, redact
+from .common import HarnessError, checked_path, now, redact
 from .engine import Engine, validate_plan
 from .state import Store
-from . import hooks, integration, report, usage, verify, efficiency, telemetry
+from . import state, hooks, report, usage, verify, efficiency, telemetry
+
+# Directory holding this harness (als_harness/ and harness.py when installed).
+HOME = Path(__file__).resolve().parents[1]
+DOCTOR_EVENTS = ('SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd')
+RECENT_SESSION_SECONDS = 600
 
 
-def doctor(project, store, probe=False):
+def detect_scope(home=HOME):
+    """'project' when running from <project>/.astra-luna-sol/harness.py, else 'global'."""
+    if home.name == '.astra-luna-sol' and (home / 'harness.py').is_file():
+        return 'project'
+    return 'global'
+
+
+def git_project(cwd):
+    """Main project for a directory: git common dir's parent, so forked worktrees map home."""
+    def rev_parse(*flags):
+        try:
+            done = subprocess.run(['git', '-C', str(cwd), 'rev-parse', *flags],
+                                  capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        value = done.stdout.strip()
+        return Path(value) if done.returncode == 0 and value else None
+    common = rev_parse('--path-format=absolute', '--git-common-dir')
+    if common is not None and common.name == '.git' and common.parent.is_dir():
+        return common.parent.resolve()
+    top = rev_parse('--show-toplevel')
+    return top.resolve() if top is not None and top.is_dir() else None
+
+
+def resolve_project(args, scope, payload=None):
+    """--project wins (legacy hooks); project scope owns its parent; global uses cwd/git."""
+    if args.project is not None:
+        return args.project.resolve(strict=True)
+    if scope == 'project':
+        return HOME.parent.resolve(strict=True)
+    if args.cmd == 'hook':
+        cwd = payload.get('cwd') if isinstance(payload, dict) else None
+        if not isinstance(cwd, str) or not cwd or not Path(cwd).is_dir():
+            return None
+        return git_project(Path(cwd))
+    return git_project(Path.cwd()) or Path.cwd().resolve(strict=True)
+
+
+def supports_scope(func):
+    try:
+        return 'scope' in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def state_path(project, scope):
+    # COMPAT(0.5 engine branch): drop the fallback once state.locate takes scope.
+    if supports_scope(state.locate):
+        return state.locate(project, scope=scope)
+    return state.locate(project)
+
+
+def open_store(project, scope):
+    # COMPAT(0.5 engine branch): drop the fallback once Store takes scope.
+    if supports_scope(Store):
+        return Store(project, scope=scope)
+    return Store(project)
+
+
+def default_session(store, mode):
+    """--session default. CODEX_THREAD_ID is not set by Codex 0.162, so fall back to
+    exactly one SessionStart receipt from the last 10 minutes; never guess between several."""
+    env = os.environ.get('CODEX_THREAD_ID')
+    if env:
+        return env, 'CODEX_THREAD_ID', None
+    cutoff = now() - RECENT_SESSION_SECONDS
+    recent = []
+    for row in store.db.execute('SELECT id,doc FROM sessions'):
+        started = json.loads(row['doc']).get('session_start_at')
+        if isinstance(started, (int, float)) and started >= cutoff:
+            recent.append(row['id'])
+    if len(recent) == 1:
+        return recent[0], 'recent_session_start', None
+    problem = ('No --session given and ' + str(len(recent))
+               + ' SessionStart receipts in the last 10 minutes; cannot pick the session safely.')
+    if mode == 'guarded':
+        raise HarnessError(problem + ' Guarded mode requires --session <session id>.')
+    return None, None, problem + ' Observe run started without a session; usage/hook linkage disabled.'
+
+
+def hooks_file(project, scope):
+    if scope == 'project':
+        return checked_path(project, '.codex/hooks.json')
+    return Path(os.environ.get('CODEX_HOME') or '~/.codex').expanduser() / 'hooks.json'
+
+
+def als_command(handler):
+    command = handler.get('command') if isinstance(handler, dict) else None
+    return isinstance(command, str) and 'harness.py' in command and re.search(r'\shook(\s|$)', command) is not None
+
+
+def missing_events(doc):
+    configured = doc.get('hooks') if isinstance(doc, dict) else None
+    if not isinstance(configured, dict):
+        return list(DOCTOR_EVENTS)
+    missing = []
+    for event in DOCTOR_EVENTS:
+        groups = configured.get(event)
+        groups = groups if isinstance(groups, list) else []
+        if not any(isinstance(g, dict) and isinstance(g.get('hooks'), list) and any(als_command(h) for h in g['hooks'])
+                   for g in groups):
+            missing.append(event)
+    return missing
+
+
+def doctor(project, store, probe=False, scope='project'):
     issues = []
     installed = False
+    missing = list(DOCTOR_EVENTS)
+    path = None
     try:
-        raw = checked_path(project, '.codex/hooks.json').read_bytes()
-        doc = integration.parse(raw)
-        installed = all(g in doc.get('hooks', {}).get(e, []) for e, g in integration.groups(project).items())
+        path = hooks_file(project, scope)
+        doc = json.loads(path.read_bytes())
+        missing = missing_events(doc)
+        installed = not missing
         if not installed:
-            issues.append('ALS hooks missing or customized; review /hooks')
-    except (OSError, HarnessError):
-        issues.append('Project hooks not installed/readable')
+            issues.append('ALS hook handler missing for ' + ', '.join(missing) + '; review /hooks')
+    except (OSError, ValueError, HarnessError):
+        issues.append('Hooks file not installed/readable')
     observed = {}
     rows = store.db.execute('SELECT id,doc FROM sessions ORDER BY rowid DESC LIMIT 8') if store else []
     for row in rows:
         observed[row['id']] = json.loads(row['doc']).get('seen', [])
-    result = {'hooks_configured': installed, 'observed_events_by_session': observed, 'issues': issues,
+    result = {'hooks_configured': installed, 'hook_events_missing': missing, 'scope': scope,
+              'hooks_file': str(path) if path else None, 'state_path': str(state_path(project, scope)),
+              'observed_events_by_session': observed, 'issues': issues,
               'paid_model_calls': False, 'hook_trust_verified': False, 'blocking_behavior_verified': False,
               'note': 'Review/trust with /hooks. Observed callbacks and fixtures are not an end-to-end proof'
                       ' of installed Codex enforcement.'}
@@ -49,13 +166,16 @@ def doctor(project, store, probe=False):
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    here = Path(__file__).resolve().parents[1]
-    default = here.parent if here.name == '.astra-luna-sol' else Path.cwd()
-    p.add_argument('--project', type=Path, default=default)
+    p.add_argument('--project', type=Path, default=None,
+                   help='Project root. Default: the parent of an installed .astra-luna-sol/ (project scope);'
+                        ' otherwise the main worktree of the current directory (hooks: of the payload cwd).')
     sub = p.add_subparsers(dest='cmd', required=True)
     start = sub.add_parser('start')
     start.add_argument('--plan', type=Path, required=True)
-    start.add_argument('--session', default=os.environ.get('CODEX_THREAD_ID'))
+    start.add_argument('--session', default=None,
+                       help='Codex session id. Default: $CODEX_THREAD_ID, else the single SessionStart receipt'
+                            ' from the last 10 minutes. With zero or several, guarded mode refuses and observe'
+                            ' starts without a session (warning).')
     start.add_argument('--mode', choices=['observe', 'guarded'], default='observe')
     start.add_argument('--ack-hook-limits', action='store_true')
     d = sub.add_parser('doctor')
@@ -128,9 +248,17 @@ def dispatch(args, store):
         data = args.plan.read_bytes()
         if len(data) > 262144:
             raise HarnessError('Plan file too large')
-        out = {'run': e.start(json.loads(data), args.session, args.mode, args.ack_hook_limits), 'models_called': False}
+        plan = json.loads(data)
+        session, source, problem = args.session, 'explicit', None
+        if session is None:
+            session, source, problem = default_session(store, args.mode)
+        out = {'run': e.start(plan, session, args.mode, args.ack_hook_limits), 'models_called': False,
+               'session': session, 'session_source': source}
+        if problem:
+            out['warnings'] = [problem]
+            print('ALS WARNING: ' + problem, file=sys.stderr)
     elif args.cmd == 'doctor':
-        out = doctor(store.project, store, args.probe)
+        out = doctor(store.project, store, args.probe, args.scope)
     elif args.cmd == 'status':
         if args.run:
             out = report.report(e, args.run)
@@ -151,8 +279,8 @@ def dispatch(args, store):
         out = e.reserve(args.run, args.task, args.call_id)
         code = 0 if out['allowed'] else 3
     elif args.cmd == 'bind':
-        e.bind(args.run, args.call_id, args.thread)
-        out = {'bound': True}
+        out = e.bind(args.run, args.call_id, args.thread) or {'bound': True, 'reason': None}
+        code = 0 if out.get('bound') else 3
     elif args.cmd == 'finish':
         e.finish(args.run, args.task, args.note, args.failed, args.workers_stopped, args.error_code)
         out = {'recorded': True, 'completion_verified': False}
@@ -191,7 +319,7 @@ def dispatch(args, store):
 def offline(args, project):
     """prepare/analyze: no DB is created just to analyze a report or prepare a plan."""
     store = None
-    exists = (project / '.astra-luna-sol/state/runs.sqlite').is_file()
+    exists = state_path(project, args.scope).is_file()
     try:
         if args.cmd == 'prepare':
             raw = args.plan.read_bytes()
@@ -199,7 +327,7 @@ def offline(args, project):
                 raise HarnessError('Plan file too large')
             plan = json.loads(raw)
             if args.use_history and exists:
-                store = Store(project)
+                store = open_store(project, args.scope)
             history = telemetry.history(store, plan.get('workload', 'unspecified')) if args.use_history else None
             return validate_plan(efficiency.prepare(plan, args.profile, history))
         if args.report_file:
@@ -208,7 +336,7 @@ def offline(args, project):
                 raise HarnessError('Report file too large')
             return telemetry.metrics(json.loads(raw))
         if exists:
-            store = Store(project)
+            store = open_store(project, args.scope)
         if args.run:
             if store is None:
                 raise HarnessError('No managed runs registered')
@@ -230,18 +358,23 @@ def main(argv=None):
             if len(data) > 1024 * 1024:
                 raise HarnessError('Oversized hook input')
             payload = json.loads(data)
-        project = args.project.resolve(strict=True)
+        args.scope = detect_scope()
+        project = resolve_project(args, args.scope, payload)
+        if project is None:
+            # Global hook outside any git project: nothing to record or enforce.
+            print(json.dumps({}))
+            return 0
         if args.cmd in ('prepare', 'analyze'):
             print(json.dumps(offline(args, project), ensure_ascii=False, indent=2))
             return 0
-        if args.cmd in ('status', 'doctor') and not (project / '.astra-luna-sol/state/runs.sqlite').exists():
+        if args.cmd in ('status', 'doctor') and not state_path(project, args.scope).exists():
             if args.cmd == 'doctor':
-                out = doctor(project, None, args.probe)
+                out = doctor(project, None, args.probe, args.scope)
             else:
                 out = {'runs': [], 'note': 'No managed runs registered'}
             print(json.dumps(out, ensure_ascii=False, indent=2))
             return 0
-        store = Store(project)
+        store = open_store(project, args.scope)
         if args.cmd == 'hook':
             out = hooks.handle(store, payload)
             code = 0
