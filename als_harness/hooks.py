@@ -10,6 +10,7 @@ from .common import ACTIVE, HarnessError, digest, ident, now
 from .engine import Engine
 from . import usage
 
+RECEIPT_REFRESH_SECONDS = 60
 EVENTS = {'SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd', 'Interrupt'}
 
 
@@ -73,7 +74,10 @@ def linked_run(store, sid, agent):
 def record_receipt(store, sid, event, payload):
     """Session receipt; skips the write transaction when nothing would change."""
     receipt = store.get('sessions', sid)
-    if receipt is not None and event in receipt.get('seen', []) and event != 'SessionStart':
+    last = (receipt or {}).get('last_event')
+    if (receipt is not None and event in receipt.get('seen', []) and event != 'SessionStart'
+            and isinstance(last, (int, float)) and now() - last < RECEIPT_REFRESH_SECONDS):
+        # last_event (session auto-pick activity) stays fresh to within a minute.
         return receipt
     with store.tx():
         receipt = store.get('sessions', sid) or {'seen': [], 'transcripts': []}

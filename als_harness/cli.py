@@ -90,23 +90,31 @@ def open_store(project, scope, hook=False):
 
 
 def default_session(store, mode):
-    """--session default. CODEX_THREAD_ID is not set by Codex 0.162, so fall back to
-    exactly one SessionStart receipt from the last 10 minutes; never guess between several."""
+    """--session default -> (session, source, warning).
+
+    $CODEX_THREAD_ID wins when set. Otherwise, in observe mode only, pick
+    the session only when exactly one session receipt saw ANY hook event in
+    the last 10 minutes, and always warn naming it. Guarded mode never
+    auto-picks: it requires --session (or $CODEX_THREAD_ID).
+    """
     env = os.environ.get('CODEX_THREAD_ID')
     if env:
         return env, 'CODEX_THREAD_ID', None
+    if mode == 'guarded':
+        raise HarnessError('Guarded mode requires --session <session id>; it never picks a session automatically.')
     cutoff = now() - RECENT_SESSION_SECONDS
     recent = []
     for row in store.db.execute('SELECT id,doc FROM sessions'):
-        started = json.loads(row['doc']).get('session_start_at')
-        if isinstance(started, (int, float)) and started >= cutoff:
+        doc = json.loads(row['doc'])
+        last = doc.get('last_event', doc.get('session_start_at'))
+        if isinstance(last, (int, float)) and last >= cutoff:
             recent.append(row['id'])
     if len(recent) == 1:
-        return recent[0], 'recent_session_start', None
+        return recent[0], 'recent_session_start', (
+            'No --session given; picked session ' + recent[0] + ', the only session with hook activity in the'
+            ' last 10 minutes. If that is not this chat, cancel this run and pass --session <session id>.')
     problem = ('No --session given and ' + str(len(recent))
-               + ' SessionStart receipts in the last 10 minutes; cannot pick the session safely.')
-    if mode == 'guarded':
-        raise HarnessError(problem + ' Guarded mode requires --session <session id>.')
+               + ' sessions with hook activity in the last 10 minutes; cannot pick the session safely.')
     return None, None, problem + ' Observe run started without a session; usage/hook linkage disabled.'
 
 
@@ -209,9 +217,10 @@ def parser():
     start = sub.add_parser('start')
     start.add_argument('--plan', type=Path, required=True, help="Plan JSON file, or '-' for stdin.")
     start.add_argument('--session', default=None,
-                       help='Codex session id. Default: $CODEX_THREAD_ID, else the single SessionStart receipt'
-                            ' from the last 10 minutes. With zero or several, guarded mode refuses and observe'
-                            ' starts without a session (warning).')
+                       help='Codex session id. Default: $CODEX_THREAD_ID; else (observe only) the single session'
+                            ' with any hook event in the last 10 minutes, with a warning naming it. With zero or'
+                            ' several, observe starts without a session (warning). Guarded mode never picks:'
+                            ' pass --session.')
     start.add_argument('--mode', choices=['observe', 'guarded'], default='observe')
     start.add_argument('--ack-hook-limits', action='store_true')
     d = sub.add_parser('doctor')

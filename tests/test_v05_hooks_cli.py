@@ -167,6 +167,7 @@ class CliScopeTests(unittest.TestCase):
             with s.tx():
                 doc = s.get('sessions', 'old')
                 doc['session_start_at'] = time.time() - 3600
+                doc['last_event'] = time.time() - 3600  # r3: any recent event counts
                 s.session('old', doc)
         finally:
             s.close()
