@@ -175,7 +175,7 @@ class HarnessTests(unittest.TestCase):
         with patch.dict(os.environ,{'CODEX_HOME':str(home)}):
             usage.sync_path(self.s,self.s.run(r),file);usage.sync_path(self.s,self.s.run(r),file)
         result=report.report(self.e,r)
-        self.assertEqual(result['budget']['confirmed_tokens'],220)
+        self.assertEqual(result['budget']['confirmed_tokens'],80)  # counted: uncached input + output
         self.assertEqual({x['recorded_effort'] for x in result['usage_by_thread_model_effort']},{'high','medium'})
     def test_budget_estimate_stops_new_reservation(self):
         t=self.task();t['estimate_tokens']=101;p=self.plan([t]);p['budget']={'tokens':100}

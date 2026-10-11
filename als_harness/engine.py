@@ -4,7 +4,7 @@ import copy
 import json
 import re
 import uuid
-from .common import ACTIVE, TERMINAL, ROLES, HarnessError, digest, ident, now, overlap, relative, checked_path
+from .common import ACTIVE, TERMINAL, ROLES, HarnessError, counted_tokens, digest, ident, now, overlap, relative, checked_path
 from .snapshot import capture
 from . import efficiency
 
@@ -116,18 +116,17 @@ class Engine:
         return rid
 
     def budget(self, run):
-        rows = self.s.db.execute('SELECT doc FROM usage WHERE run=?', (run['id'],)).fetchall()
+        """Soft budget position in counted tokens (uncached input + output)."""
+        rows = self.s.db.execute('SELECT thread,doc FROM usage WHERE run=?', (run['id'],)).fetchall()
         confirmed = 0
-        for row in rows:
-            usage = json.loads(row['doc'])['usage']
-            confirmed += usage['input_tokens'] + usage['output_tokens']
-        active = [t for t in self.s.tasks(run['id']) if t['status'] in ACTIVE]
         # Consume estimates as confirmed worker usage arrives, avoiding double
         # reservation of the same already-accounted responses.
         by_thread = {}
-        for row in self.s.db.execute('SELECT thread,doc FROM usage WHERE run=?', (run['id'],)):
-            usage = json.loads(row['doc'])['usage']
-            by_thread[row['thread']] = by_thread.get(row['thread'], 0) + usage['input_tokens'] + usage['output_tokens']
+        for row in rows:
+            tokens = counted_tokens(json.loads(row['doc'])['usage'])
+            confirmed += tokens
+            by_thread[row['thread']] = by_thread.get(row['thread'], 0) + tokens
+        active = [t for t in self.s.tasks(run['id']) if t['status'] in ACTIVE]
         reserved = sum(max(0, t['estimate_tokens'] - by_thread.get(t['attempts'][-1].get('thread_id'), 0))
                        for t in active if t.get('attempts') and t.get('executor') != 'head')
         seconds = max(0, run.get('closed_at', now()) - run['created'])
