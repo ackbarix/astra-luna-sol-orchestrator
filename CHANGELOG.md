@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 — safe reinstallation after preserved harness state
+
+- Permit reinstallation after 0.3.0 uninstall kept an unchanged
+  `.astra-luna-sol/.gitignore` to protect persistent state/evidence.
+- Reclaim only byte-identical ignore files when the manifest is absent and
+  runtime state/evidence exists; edited, unrelated and symlinked paths
+  continue to fail closed.
+- Add regression cases for uninstall → reinstall, runtime preservation,
+  modified leftovers and unowned identical files without runtime state.
+
 ## 0.3.0 — cooperative harness, observe first
 
 - Add persistent SQLite runs/tasks/attempts and atomic cross-task path/resource reservations.

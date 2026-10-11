@@ -24,7 +24,7 @@ from als_harness import integration as hook_config
 ROOT = Path(__file__).resolve().parent
 START, END = "<!-- ALS:BEGIN -->", "<!-- ALS:END -->"
 CONFIG, AGENTS, MANIFEST = ".codex/config.toml", "AGENTS.md", ".astra-luna-sol/manifest.json"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 HOOKS = ".codex/hooks.json"
 
 
@@ -174,9 +174,24 @@ def main(argv=None) -> int:
         before = snapshot(rel)
         if before is None or digest(before) != expected:
             raise ValueError("Modified or missing managed file: " + rel)
-    for rel in desired:
-        if rel not in state["files"] and snapshot(rel) is not None:
-            raise ValueError("User-owned path already exists: " + rel)
+    for rel, expected_data in desired.items():
+        if rel not in state["files"]:
+            previous_data = snapshot(rel)
+            if previous_data is None:
+                continue
+            # 0.3.0 deliberately retains the ignore file when a managed run
+            # leaves SQLite state/evidence, but deletes the manifest. Reuse this
+            # exact unmodified file instead of treating it as an ownership
+            # conflict. Never adopt unrelated, edited or symlinked files.
+            preserved_runtime_ignore = (
+                rel == ".astra-luna-sol/.gitignore"
+                and raw_state is None
+                and previous_data == expected_data
+                and any((target / ".astra-luna-sol" / part).exists()
+                        for part in ("state", "evidence"))
+            )
+            if not preserved_runtime_ignore:
+                raise ValueError("User-owned path already exists: " + rel)
     before_config = snapshot(CONFIG)
     config_state = state.get("config")
     if config_state:
@@ -265,7 +280,7 @@ def main(argv=None) -> int:
         print("DRY RUN: nothing written, no Codex/OpenCodex calls")
         return 0
     commit(target, plan, snapshots)
-    print("UNINSTALL OK" if args.uninstall else "INSTALL OK 0.3.0: run codex; review /hooks before managing a run (observe default)")
+    print("UNINSTALL OK" if args.uninstall else "INSTALL OK 0.3.1: run codex; review /hooks before managing a run (observe default)")
     return 0
 
 

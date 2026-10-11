@@ -1,8 +1,15 @@
-# Astra–Luna–Sol Orchestrator · 0.3.0
+# Astra–Luna–Sol Orchestrator · 0.3.1
 
 프로젝트에서 **`codex`만 실행**하는 개인용 GPT 오케스트레이션입니다.
 참고: [donvito/codex-astra-luna-orchestrator](https://github.com/donvito/codex-astra-luna-orchestrator).
 OpenAI/OpenCodex의 공식 배포물이 아닙니다. 토큰 절감률이나 최고 성능은 보장하지 않습니다.
+
+## 0.3.1: 재설치 보호 버그 수정
+
+0.3.0 제거 시 작업 기록을 보호하려고 남긴 `.astra-luna-sol/.gitignore`가
+이후 설치를 막는 문제를 해결했습니다. 작업 상태나 증거 디렉터리가 남아 있고,
+해당 ignore 파일이 배포본과 완전히 같을 때만 재사용합니다. 수정되었거나
+다른 사용자 파일은 기존처럼 덮어쓰지 않고 거부합니다.
 
 ## 0.3.0: 경량 하네스 추가
 

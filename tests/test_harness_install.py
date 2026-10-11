@@ -49,6 +49,52 @@ class HarnessInstallTests(unittest.TestCase):
         self.assertEqual(self.call('--uninstall').returncode,0)
         self.assertEqual((runtime/'user-note').read_text(),'keep')
         self.assertTrue((self.p/'.astra-luna-sol/.gitignore').exists())
+    def test_reinstall_after_uninstall_retains_runtime_ignore(self):
+        self.assertEqual(self.call().returncode,0)
+        state=self.p/'.astra-luna-sol/state'
+        state.mkdir()
+        (state/'runs.sqlite').write_bytes(b'user-runtime-state')
+        self.assertEqual(self.call('--uninstall').returncode,0)
+        ignore=self.p/'.astra-luna-sol/.gitignore'
+        self.assertTrue(ignore.is_file())
+        self.assertEqual(ignore.read_bytes(),(ROOT/'profiles/runtime.gitignore').read_bytes())
+        preview=self.call('--dry-run')
+        self.assertEqual(preview.returncode,0,preview.stderr)
+        result=self.call()
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.call('--check').returncode,0)
+        self.assertEqual((state/'runs.sqlite').read_bytes(),b'user-runtime-state')
+        self.assertTrue(ignore.exists())
+        self.assertEqual(self.call('--uninstall').returncode,0)
+        self.assertEqual((state/'runs.sqlite').read_bytes(),b'user-runtime-state')
+        self.assertTrue(ignore.exists())
+
+    def test_modified_preserved_ignore_refuses_reinstall_without_writes(self):
+        self.assertEqual(self.call().returncode,0)
+        runtime=self.p/'.astra-luna-sol/state'
+        runtime.mkdir()
+        (runtime/'keep').write_text('do-not-remove')
+        self.assertEqual(self.call('--uninstall').returncode,0)
+        ignore=self.p/'.astra-luna-sol/.gitignore'
+        ignore.write_text(ignore.read_text()+'custom-rule/\\n')
+        old=ignore.read_bytes()
+        for args in (('--dry-run',),()):
+            failure=self.call(*args)
+            self.assertEqual(failure.returncode,2)
+            self.assertIn('User-owned path already exists',failure.stderr)
+        self.assertFalse((self.p/'.astra-luna-sol/manifest.json').exists())
+        self.assertEqual(ignore.read_bytes(),old)
+        self.assertEqual((runtime/'keep').read_text(),'do-not-remove')
+
+    def test_unowned_identical_ignore_without_runtime_not_adopted(self):
+        target=self.p/'.astra-luna-sol'
+        target.mkdir()
+        (target/'.gitignore').write_bytes((ROOT/'profiles/runtime.gitignore').read_bytes())
+        result=self.call('--dry-run')
+        self.assertEqual(result.returncode,2)
+        self.assertIn('User-owned path already exists',result.stderr)
+        self.assertFalse((target/'manifest.json').exists())
+
     def test_hooks_removed_when_skip_selected(self):
         self.assertEqual(self.call().returncode,0)
         self.assertEqual(self.call('--skip-hooks').returncode,0)
