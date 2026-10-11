@@ -353,12 +353,31 @@ class VerificationLockTests(EngineCase):
             proc.kill()
         proc.wait()
 
+    @staticmethod
+    def ours(pid, start):
+        """Test-only identity check: True only while pid is provably the
+        recorded process (signalable, readable, same start, not a zombie).
+        The runtime treats "unknown" as alive (fail-safe for locks); a test
+        waiting for death must not, because a recycled pid can be unreadable
+        (seen on CI runners) and would otherwise look alive forever."""
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        info = process_info(pid)
+        return info is not None and info[0] not in ('Z', 'X') and (start is None or info[1] == start)
+
     def wait_dead(self, pid, start):
         deadline = time.monotonic() + 30
-        uid = os.geteuid()  # verify and its checks run as this test's uid
-        while process_alive(pid, start, uid) and time.monotonic() < deadline:
+        while self.ours(pid, start) and time.monotonic() < deadline:
             time.sleep(.05)
-        return not process_alive(pid, start, uid)
+        return not self.ours(pid, start)
+
+    def assert_killed_by_harness(self, rid):
+        """The lock release itself must have killed the recorded check group."""
+        events = [json.loads(r['doc']) for r in self.s.db.execute(
+            "SELECT doc FROM events WHERE run=? AND kind='verification_lock_cleared'", (rid,))]
+        self.assertTrue(any(e.get('check_group_killed') for e in events), events)
 
     def assert_dead(self, pid, start, verify_proc=None):
         """wait_dead with a diagnostic message (platform process-state paths differ)."""
@@ -408,6 +427,7 @@ class VerificationLockTests(EngineCase):
                 proc, lock = self.spawn_verify(rid)
                 self.e.pause(rid, 'operator stop', cancel=cancel)
                 self.assertIsNone(self.s.run(rid)['verification'])
+                self.assert_killed_by_harness(rid)
                 self.assert_dead(lock['pgid'], lock['pgid_start'], proc)
                 proc.wait(timeout=60)
                 self.assertEqual(self.s.run(rid)['evidence'], {})
@@ -419,6 +439,7 @@ class VerificationLockTests(EngineCase):
             self.e.resume(rid)
         self.e.resume(rid, workers_stopped=True)
         self.assertIsNone(self.s.run(rid)['verification'])
+        self.assert_killed_by_harness(rid)
         self.assert_dead(lock['pgid'], lock['pgid_start'], proc)
         proc.wait(timeout=60)
         self.assertEqual(self.s.run(rid)['evidence'], {})
