@@ -94,7 +94,8 @@ def default_session(store, mode):
 
     $CODEX_THREAD_ID wins when set. Otherwise, in observe mode only, pick
     the session only when exactly one session receipt saw ANY hook event in
-    the last 10 minutes, and always warn naming it. Guarded mode never
+    the last 10 minutes (ended sessions included in that count) and its last
+    event was not SessionEnd, and always warn naming it. Guarded mode never
     auto-picks: it requires --session (or $CODEX_THREAD_ID).
     """
     env = os.environ.get('CODEX_THREAD_ID')
@@ -103,12 +104,18 @@ def default_session(store, mode):
     if mode == 'guarded':
         raise HarnessError('Guarded mode requires --session <session id>; it never picks a session automatically.')
     cutoff = now() - RECENT_SESSION_SECONDS
-    recent = []
+    recent, ended = [], []
     for row in store.db.execute('SELECT id,doc FROM sessions'):
         doc = json.loads(row['doc'])
         last = doc.get('last_event', doc.get('session_start_at'))
         if isinstance(last, (int, float)) and last >= cutoff:
             recent.append(row['id'])
+            if isinstance(doc.get('ended_at'), (int, float)):
+                ended.append(row['id'])
+    if len(recent) == 1 and ended:
+        return None, None, ('No --session given and the only session with hook activity in the last 10 minutes ('
+                            + recent[0] + ') has ended; cannot pick the session safely. Observe run started'
+                            ' without a session; usage/hook linkage disabled.')
     if len(recent) == 1:
         return recent[0], 'recent_session_start', (
             'No --session given; picked session ' + recent[0] + ', the only session with hook activity in the'
