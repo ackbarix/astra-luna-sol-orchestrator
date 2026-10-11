@@ -17,6 +17,8 @@ REPORT_SCHEMAS = {1, 2}
 # Run warnings that do not affect counted usage integrity. Anything else (missing
 # sources, conflicts, post-closure work, legacy cumulative-only data) disqualifies.
 BENIGN_WARNING_PREFIXES = ('no response ID', 'not_reported:cached_input_tokens', 'reported_total_differs')
+# Attempt outcomes counted as failed attempts (all reduce suggested parallelism).
+FAILED_ATTEMPT_STATES = {'failed', 'cancelled', 'interrupted'}
 NO_REDUCTION = max(p['max_concurrent'] for p in PROFILES.values())
 
 
@@ -186,14 +188,16 @@ def history(store, workload):
                     valid = False
                     break
                 threads.add(tid)
-                run_failed_attempts += a.get('status') == 'failed'
+                run_failed_attempts += a.get('status') in FAILED_ATTEMPT_STATES
             if not valid:
                 break
             # Include all retry costs but do not misassign different-model retries
             # to the final role's cost bucket.
             if len({(a.get('requested_model'), a.get('requested_effort')) for a in t['attempts']}) > 1:
                 continue
-            if threads and all(k in t for k in ('role', 'kind', 'complexity', 'risk')):
+            # Only accepted (completed) tasks are cost samples; a failed or
+            # cancelled task's spend says nothing about finishing the work.
+            if t.get('status') == 'completed' and threads and all(k in t for k in ('role', 'kind', 'complexity', 'risk')):
                 cohort.append((bucket(t), sum(by_thread[tid] for tid in threads)))
         if not valid:
             continue

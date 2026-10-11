@@ -15,7 +15,9 @@ EVENTS = {'SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'Subagen
 
 
 def spawn_name(name):
-    return isinstance(name, str) and name.rsplit('.', 1)[-1] in {'spawn_agent', 'Agent'}
+    """Bare `spawn_agent` or a namespaced `<ns>.spawn_agent`. The installed
+    matcher is `spawn_agent`, so no other tool name ever reaches the hook."""
+    return isinstance(name, str) and name.rsplit('.', 1)[-1] == 'spawn_agent'
 
 
 def context(event, message):
@@ -170,8 +172,9 @@ def handle(store, payload):
         if event == 'SessionStart':
             pending = [r['id'] for r in store.runs() if r['status'] not in {'completed', 'cancelled'}][:4]
             message = ('ALS harness available; session ' + sid + '. Do not create a run for trivial work. '
-                       + 'Register a plan with `' + cli_hint(store) + ' start --plan FILE --session ' + sid + '`'
-                       + ' for managed work. Pending runs: ' + (','.join(pending) or 'none'))
+                       + 'For managed work, prepare the draft plan with `' + cli_hint(store)
+                       + ' prepare --plan DRAFT > FILE`, then register it with `' + cli_hint(store)
+                       + ' start --plan FILE --session ' + sid + '`. Pending runs: ' + (','.join(pending) or 'none'))
             ended = session_end_runs(store)[:2]
             if ended:
                 # SessionEnd paused these for safety; reattaching stays an explicit user step.

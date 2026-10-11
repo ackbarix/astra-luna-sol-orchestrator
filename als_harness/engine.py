@@ -56,6 +56,9 @@ def validate_plan(plan):
                 or type(criterion['required']) is not bool):
             raise HarnessError('Criterion requires description and boolean required')
     prepared = 'efficiency' in p
+    if not prepared and any(isinstance(t, dict) and 'role' not in t for t in p['tasks']):
+        raise HarnessError('plan not prepared: run `als prepare --plan FILE > prepared.json`'
+                           ' then `als start --plan prepared.json`')
     for task in p['tasks']:
         forbidden = {k for k in RUNTIME_TASK_KEYS & task.keys() if not (k == 'executor' and prepared)}
         if forbidden:
