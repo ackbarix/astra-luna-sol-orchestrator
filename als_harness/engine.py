@@ -112,13 +112,22 @@ class Engine:
     def __init__(self, store):
         self.s = store
 
-    def start(self, plan, session=None, mode='observe', ack=False):
+    def start(self, plan, session=None, mode='observe', ack=False, worktree=None):
+        """Register a run. `worktree` is the checkout the run works in (a
+        linked git worktree of this project, or the project itself); code
+        snapshots, checks and evidence freshness use it, while state stays
+        keyed by the main project."""
         p = validate_plan(plan)
         if mode not in ('observe', 'guarded'):
             raise HarnessError('Unknown mode')
         if session is not None:
             ident(session)
-        baseline = capture(self.s.project)
+        root = self.s.project
+        if worktree is not None:
+            root = self.s.worktree_of(worktree)
+            if root is None:
+                raise HarnessError('Worktree is not part of this project\'s repository: ' + str(worktree))
+        baseline = capture(root)
         with self.s.tx():
             if session and self.s.for_session(session):
                 raise HarnessError('Session already has an unfinished run')
@@ -131,7 +140,7 @@ class Engine:
             run = {'id': rid, 'goal': p['goal'], 'status': 'running', 'session': session, 'mode': mode,
                    'created': now(), 'baseline': baseline, 'plan': p, 'plan_hash': digest(p),
                    'completion_requested': False, 'stop_blocks': 0, 'evidence': {}, 'assessments': {},
-                   'warnings': [], 'verification': None}
+                   'warnings': [], 'verification': None, 'worktree': str(root)}
             self.s.save_run(run)
             for task in p['tasks']:
                 item = dict(task, run=rid, status='pending', attempts=[], result=None)
@@ -144,6 +153,13 @@ class Engine:
         completed/cancelled runs can never release anything again."""
         closed = {r['id'] for r in self.s.runs() if r['status'] in TERMINAL}
         return [t for t in self.s.tasks() if t['run'] not in closed]
+
+    def root(self, run):
+        """Checkout the run works in (see Store.run_root)."""
+        return self.s.run_root(run)
+
+    def snapshot(self, rid):
+        return capture(self.root(self.s.run(rid)))
 
     # Verification lock -------------------------------------------------
     # run['verification'] = {'ticket', 'pid', 'pid_start', 'boot_id',
@@ -266,11 +282,12 @@ class Engine:
                 reasons.append('begin-head requires a task assigned to HEAD')
             if not as_head:
                 reasons.extend(efficiency.admission(run['plan'], task, self.s.tasks(rid), requested))
+            root = self.root(run)
             if run['plan'].get('efficiency'):
                 for path in task.get('context_files', []):
-                    checked_path(self.s.project, path)
+                    checked_path(root, path)
             for path in task['write_paths']:
-                checked_path(self.s.project, path)
+                checked_path(root, path)
             if run['status'] != 'running':
                 reasons.append('run is not running')
             if task['status'] != 'pending':
@@ -390,7 +407,7 @@ class Engine:
         """
         if not note or len(note) > 4000:
             raise HarnessError('A short evidence/result note is required')
-        snapshot, warning = self._try_capture()
+        snapshot, warning = self._try_capture(rid)
         with self.s.tx():
             run = self.s.run(rid)
             task = self.s.task(rid, tid)
@@ -415,7 +432,7 @@ class Engine:
             self.s.save_run(run)
 
     def accept(self, rid, tid):
-        snap = capture(self.s.project)['digest']
+        snap = self.snapshot(rid)['digest']
         with self.s.tx():
             run = self.s.run(rid)
             task = self.s.task(rid, tid)
@@ -476,7 +493,7 @@ class Engine:
             # No spawn or external action occurs here.
 
     def assess(self, rid, key, note, actor):
-        snap = capture(self.s.project)['digest']
+        snap = self.snapshot(rid)['digest']
         if not note or not actor:
             raise HarnessError('Assessment needs note and actor')
         with self.s.tx():
@@ -488,10 +505,10 @@ class Engine:
             self._observe(run, snap)
             self.s.save_run(run)
 
-    def _try_capture(self):
+    def _try_capture(self, rid):
         """(snapshot, None) or (None, warning) when the fingerprint fails."""
         try:
-            return capture(self.s.project), None
+            return self.snapshot(rid), None
         except (HarnessError, OSError, UnicodeError, subprocess.SubprocessError) as ex:
             return None, 'code snapshot unavailable (' + type(ex).__name__ + '): ' + str(ex)[:200]
 
@@ -535,7 +552,7 @@ class Engine:
         """Certify completion. A completed run is never downgraded: completing
         it again returns the recorded result for the same code, or an error
         when the code differs."""
-        snap = capture(self.s.project)['digest']
+        snap = self.snapshot(rid)['digest']
         with self.s.tx():
             self.live_verifications()
             run = self.s.run(rid)
@@ -599,7 +616,7 @@ class Engine:
         a live one needs --workers-stopped, which clears it and kills the
         recorded check group.
         """
-        snapshot = capture(self.s.project)
+        snapshot = self.snapshot(rid)
         with self.s.tx():
             run = self.s.run(rid)
             if run['status'] == 'cancelled':

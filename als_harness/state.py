@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import sqlite3
-from .common import HarnessError, checked_path, private_dir, encoded, now
+from .common import HarnessError, checked_path, git_common_dir, git_toplevel, private_dir, encoded, now
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, session TEXT, doc TEXT NOT NULL);
@@ -152,6 +152,46 @@ class Store:
 
     def close(self):
         self.db.close()
+
+    _common = False
+
+    def common_dir(self):
+        """Git common dir of the managed project (cached), or None outside git."""
+        if self._common is False:
+            self._common = git_common_dir(self.project)
+        return self._common
+
+    def belongs(self, path):
+        """True when path is inside the main checkout or inside any linked
+        worktree of the same repository (same git common dir)."""
+        path = Path(path).resolve()
+        if path == self.project or self.project in path.parents:
+            return True
+        mine = self.common_dir()
+        return mine is not None and path.is_dir() and git_common_dir(path) == mine
+
+    def worktree_of(self, path):
+        """Top level of the worktree of this repository that contains path, or None.
+
+        A linked worktree nested under the main checkout maps to itself; any
+        other directory under the main checkout (including a nested foreign
+        repository) maps to the project.
+        """
+        path = Path(path).resolve()
+        if not path.is_dir():
+            return None
+        top = git_toplevel(path)
+        mine = self.common_dir()
+        if top is not None and mine is not None and git_common_dir(top) == mine:
+            return top
+        if path == self.project or self.project in path.parents:
+            return self.project
+        return None
+
+    def run_root(self, run):
+        """Worktree a run works in: its recorded worktree, else the project (pre-0.5.1 runs)."""
+        recorded = run.get('worktree') if isinstance(run, dict) else None
+        return Path(recorded) if isinstance(recorded, str) and recorded else self.project
 
     @contextmanager
     def tx(self):

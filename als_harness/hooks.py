@@ -141,8 +141,9 @@ def handle(store, payload):
     ident(sid)
     agent = child_agent(payload)
     cwd = Path(payload.get('cwd') or '').resolve()
-    if cwd != store.project and store.project not in cwd.parents:
-        # Forked-worktree children run outside the project; keep their lifecycle
+    if not store.belongs(cwd):
+        # The main checkout and every linked worktree of the same repository
+        # belong to this project. Children forked elsewhere keep their lifecycle
         # and spawn events only when the parent session maps to a run here.
         child_event = event in {'SubagentStart', 'SubagentStop'} or (
             event in {'PreToolUse', 'PostToolUse'} and agent is not None)

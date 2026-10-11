@@ -82,7 +82,8 @@ def verify(engine, rid, check_id=None, execute_commands=False):
         run = s.run(rid)
         return {'executed': False, 'checks': run['plan']['checks'],
                 'message': 'Use --execute only after reviewing the declared argv commands.'}
-    before = capture(s.project)
+    root = engine.root(s.run(rid))
+    before = capture(root)
     ticket = uuid.uuid4().hex
     with s.tx():
         if engine.live_verifications():
@@ -117,14 +118,14 @@ def verify(engine, rid, check_id=None, execute_commands=False):
     try:
         folder = s.evidence_dir(rid)
         for check in checks:
-            record = {'id': check['id'], 'argv': check['argv'], 'cwd': str(s.project), 'stamp': now(),
+            record = {'id': check['id'], 'argv': check['argv'], 'cwd': str(root), 'stamp': now(),
                       'snapshot': before['digest']}
             try:
-                outcome = execute(check['argv'], s.project, check['timeout'],
+                outcome = execute(check['argv'], root, check['timeout'],
                                   on_spawn=lambda proc, key=check['id']: record_group(proc, key))
             except OSError as ex:
                 outcome = {'exit_code': None, 'timed_out': False, 'truncated': False, 'log': type(ex).__name__}
-            after = capture(s.project)
+            after = capture(root)
             record.update({k: v for k, v in outcome.items() if k != 'log'})
             unchanged = after['digest'] == before['digest']
             record['status'] = 'passed' if outcome['exit_code'] == 0 and not outcome['timed_out'] and unchanged else 'failed'

@@ -348,8 +348,12 @@ def dispatch(args, store):
         session, source, problem = args.session, 'explicit', None
         if session is None:
             session, source, problem = default_session(store, args.mode)
-        out = {'run': e.start(plan, session, args.mode, args.ack_hook_limits), 'models_called': False,
-               'session': session, 'session_source': source}
+        # The run works in the worktree it was started from (main checkout or a
+        # linked `git worktree`); state stays keyed by the main project.
+        worktree = store.worktree_of(Path.cwd())
+        rid = e.start(plan, session, args.mode, args.ack_hook_limits, worktree=worktree)
+        out = {'run': rid, 'models_called': False, 'session': session, 'session_source': source,
+               'worktree': store.run(rid)['worktree']}
         if problem:
             out['warnings'] = [problem]
             print('ALS WARNING: ' + problem, file=sys.stderr)

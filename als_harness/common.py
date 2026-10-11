@@ -195,3 +195,33 @@ def process_alive(pid, start=None):
     if state in ('Z', 'X'):
         return False
     return start is None or current_start == start
+
+
+def _rev_parse(path, flag):
+    try:
+        done = subprocess.run(['git', '-C', str(path), 'rev-parse', flag], capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = os.fsdecode(done.stdout.strip())
+    return value if done.returncode == 0 and value else None
+
+
+def git_toplevel(path):
+    """Absolute top level of the worktree containing path, or None."""
+    top = _rev_parse(path, '--show-toplevel')
+    return Path(top).resolve() if top else None
+
+
+def git_common_dir(path):
+    """Absolute git common directory shared by every worktree of path's
+    repository, or None. Old git prints it relative to cwd (no --path-format)."""
+    path = Path(path).resolve()
+    common = _rev_parse(path, '--git-common-dir')
+    if common is None:
+        return None
+    candidate = (path / common).resolve()
+    if candidate.is_dir():
+        return candidate
+    top = git_toplevel(path)
+    candidate = (top / common).resolve() if top else None
+    return candidate if candidate is not None and candidate.is_dir() else None
