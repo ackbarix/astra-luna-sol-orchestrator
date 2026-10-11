@@ -232,6 +232,23 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
         self.assertIn('ALS install at ' + str(custom), text)
         self.assertNotIn('not managed by ALS', text)
 
+    def test_same_home_manifestless_als_suggests_adopt_not_a_loop(self):
+        # A custom ALS_HOME is baked into the installed `als`; the same home
+        # must not be reported as "another install".
+        custom = self.base / 'custom home'
+        self.env['ALS_HOME'] = str(custom)
+        self.ok(self.glob())
+        manifest = custom / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        del data['files']['BIN/als']  # the entrypoint on PATH, not release/bin/als
+        manifest.write_text(json.dumps(data))
+        result = self.glob()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        text = result.stdout + result.stderr
+        self.assertNotIn('ALS install at', text)
+        self.assertIn('--adopt', text)
+        self.ok(self.glob('--adopt'))
+
     def test_als_run_without_profile_uses_plain_codex(self):
         self.ok(self.glob())
         (self.codex_home / 'als.config.toml').rename(self.base / 'saved')

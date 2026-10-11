@@ -25,7 +25,10 @@ class Sandbox:
                         XDG_DATA_HOME=str(self.home / '.local/share'),
                         XDG_STATE_HOME=str(self.home / '.local/state'),
                         XDG_CONFIG_HOME=str(self.home / '.config'))
-        self.env.pop('ALS_HOME', None)
+        # Never inherit ALS/Codex session settings from the developer's shell:
+        # e.g. an exported ALS_BIN_DIR would install `als` into a real bin dir.
+        for name in [k for k in self.env if k.startswith('ALS_')] + ['CODEX_THREAD_ID']:
+            self.env.pop(name, None)
         self.p = self.repo('project')
 
     def tearDown(self):

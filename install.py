@@ -521,6 +521,15 @@ def adopt_or_refuse(session: Session, desired: dict[str, bytes], owned: dict[str
                           "differs from this release). Move your extra rules elsewhere, then delete it: rm "
                           + shlex.quote(str(session.layout.path(key))))
         other_home = foreign_als_home(previous)
+        current_home = session.layout.roots.get("ALS_HOME")
+        if other_home is not None and (
+                current_home is None
+                or os.path.realpath(other_home) == os.path.realpath(str(current_home))
+                or not (Path(other_home) / "manifest.json").is_file()):
+            # Same install (e.g. a manifest that lost this entry) or no live
+            # install there: rerunning with that ALS_HOME would loop, so fall
+            # back to the adopt / move-aside remedies below.
+            other_home = None
         if other_home is not None:
             # An `als` entrypoint written by a global install under another
             # ALS_HOME: name it instead of calling it "not managed by ALS".
