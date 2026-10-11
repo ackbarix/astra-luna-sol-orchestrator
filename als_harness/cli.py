@@ -1,7 +1,6 @@
 """User/HEAD CLI; no model dispatch, implicit retries or background processes."""
 from __future__ import annotations
 import argparse
-import inspect
 import json
 import os
 from pathlib import Path
@@ -82,25 +81,12 @@ def resolve_project(args, scope, payload=None):
     return found
 
 
-def supports_scope(func):
-    try:
-        return 'scope' in inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        return False
-
-
 def state_path(project, scope):
-    # COMPAT(0.5 engine branch): drop the fallback once state.locate takes scope.
-    if supports_scope(state.locate):
-        return state.locate(project, scope=scope)
-    return state.locate(project)
+    return state.locate(project, scope=scope)
 
 
 def open_store(project, scope):
-    # COMPAT(0.5 engine branch): drop the fallback once Store takes scope.
-    if supports_scope(Store):
-        return Store(project, scope=scope)
-    return Store(project)
+    return Store(project, scope=scope)
 
 
 def default_session(store, mode):
@@ -410,8 +396,12 @@ def dispatch(args, store):
         out = e.complete(args.run)
         code = 0 if out['completed'] else 3
     elif args.cmd in ('pause', 'cancel'):
-        e.pause(args.run, args.reason, args.cmd == 'cancel')
-        out = {'status': store.run(args.run)['status'], 'processes_killed': False}
+        paused = e.pause(args.run, args.reason, args.cmd == 'cancel')
+        # Only the run's own recorded check group can be killed; Codex
+        # workers are never signalled by the harness.
+        out = {'status': store.run(args.run)['status'],
+               'check_group_killed': paused['check_group_killed'],
+               'workers_signalled': False}
     elif args.cmd == 'resume':
         out = e.resume(args.run, args.accept_drift, args.workers_stopped, args.session)
     elif args.cmd == 'sync-usage':

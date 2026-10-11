@@ -568,13 +568,13 @@ class Engine:
         with self.s.tx():
             run = self.s.run(rid)
             if run['status'] in TERMINAL:
-                return
+                return {'check_group_killed': False}
             run['status'] = 'cancelled' if cancel else 'paused'
             run['pause_reason'] = reason[:1000]
             run['completion_requested'] = False
             if cancel:
                 run.setdefault('closed_at', now())
-            self.release_verification(run, 'run cancelled' if cancel else 'run paused')
+            killed = self.release_verification(run, 'run cancelled' if cancel else 'run paused')
             for task in self.s.tasks(rid):
                 if cancel and (task['status'] in ACTIVE or task.get('claims_held')):
                     task['status'] = 'cancelled'
@@ -587,6 +587,7 @@ class Engine:
                     task['status'] = 'uncertain'
                     self.s.save_task(task)
             self.s.save_run(run)
+            return {'check_group_killed': bool(killed)}
 
     def resume(self, rid, accept_drift=False, workers_stopped=False, session=None):
         """Reconcile a paused/blocked run without replaying work.
