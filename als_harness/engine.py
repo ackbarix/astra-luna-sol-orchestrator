@@ -2,10 +2,13 @@
 from __future__ import annotations
 import copy
 import json
+import os
 import re
+import signal
 import subprocess
 import uuid
-from .common import ACTIVE, TERMINAL, ROLES, HarnessError, counted_tokens, digest, ident, now, overlap, relative, checked_path
+from .common import (ACTIVE, TERMINAL, ROLES, HarnessError, boot_id, checked_path, counted_tokens, digest, ident,
+                     now, overlap, process_alive, process_start, relative)
 from .snapshot import capture
 from . import efficiency
 
@@ -131,6 +134,75 @@ class Engine:
         closed = {r['id'] for r in self.s.runs() if r['status'] in TERMINAL}
         return [t for t in self.s.tasks() if t['run'] not in closed]
 
+    # Verification lock -------------------------------------------------
+    # run['verification'] = {'ticket', 'pid', 'pid_start', 'boot_id',
+    #   'started', 'pgid', 'pgid_start', 'check'}: pid/pid_start identify the
+    # verify process holding the lock; pgid/pgid_start identify the check
+    # process group it started (start_new_session=True, so pgid == leader pid).
+
+    def new_verification_lock(self, ticket):
+        pid = os.getpid()
+        return {'ticket': ticket, 'pid': pid, 'pid_start': process_start(pid), 'boot_id': boot_id(),
+                'started': now(), 'pgid': None, 'pgid_start': None, 'check': None}
+
+    def verification_live(self, lock):
+        """A lock is live while its verify process exists with the recorded
+        start time in the same boot. Missing pids, recycled pids and locks
+        from an earlier boot are stale."""
+        current_boot = boot_id()
+        if lock.get('boot_id') and current_boot and lock['boot_id'] != current_boot:
+            return False
+        return process_alive(lock.get('pid'), lock.get('pid_start'))
+
+    def _kill_check_group(self, lock):
+        """SIGKILL the recorded check group only if its leader is still the
+        exact process verify started; never signal any other group."""
+        pgid = lock.get('pgid')
+        start = lock.get('pgid_start')
+        if type(pgid) is not int or pgid <= 1 or start is None:
+            return False
+        if lock.get('boot_id') != boot_id() or not process_alive(pgid, start):
+            return False
+        try:
+            if os.getpgid(pgid) != pgid:
+                return False
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    def release_verification(self, run, reason):
+        """Clear run's lock (caller saves the run inside its transaction),
+        killing a still-running check group that we recorded."""
+        lock = run.get('verification')
+        if not lock:
+            return False
+        killed = self._kill_check_group(lock)
+        run['verification'] = None
+        self.s.event('verification-cleared:' + str(lock.get('ticket')), run['id'], 'verification_lock_cleared',
+                     {'reason': reason, 'pid': lock.get('pid'), 'pgid': lock.get('pgid'),
+                      'check': lock.get('check'), 'check_group_killed': killed})
+        return killed
+
+    def live_verifications(self):
+        """Runs holding a live verification lock. Must run inside a
+        transaction: stale locks (dead owner) and locks left on terminal runs
+        are cleared and recorded as verification_lock_cleared events."""
+        live = []
+        for run in self.s.runs():
+            lock = run.get('verification')
+            if not lock:
+                continue
+            if run['status'] in TERMINAL:
+                self.release_verification(run, 'run is ' + run['status'])
+                self.s.save_run(run)
+            elif self.verification_live(lock):
+                live.append(run)
+            else:
+                self.release_verification(run, 'verify process no longer running')
+                self.s.save_run(run)
+        return live
+
     def budget(self, run):
         """Soft budget position in counted tokens (uncached input + output)."""
         rows = self.s.db.execute('SELECT thread,doc FROM usage WHERE run=?', (run['id'],)).fetchall()
@@ -220,7 +292,7 @@ class Engine:
                 paths_overlap = any(overlap(a, b) for a in task['write_paths'] for b in other['write_paths'])
                 if paths_overlap or set(task['resources']) & set(other['resources']):
                     reasons.append('resource owned by ' + other['run'] + '/' + other['id'])
-            if any(r.get('verification') for r in self.s.runs()):
+            if self.live_verifications():
                 reasons.append('verification owns stable worktree')
             budget = self.budget(run)
             if budget['stage'] == 'stop_new_work':
@@ -452,6 +524,7 @@ class Engine:
         when the code differs."""
         snap = capture(self.s.project)['digest']
         with self.s.tx():
+            self.live_verifications()
             run = self.s.run(rid)
             if run['status'] == 'completed':
                 if run.get('completed_snapshot') != snap:
@@ -475,8 +548,9 @@ class Engine:
 
         Cancel releases every claim: claim-holding tasks become 'cancelled'
         and their open attempts are marked cancelled, because a terminal run
-        can never finish, retry or accept them later. Neither path needs a
-        code fingerprint.
+        can never finish, retry or accept them later. Both clear the run's
+        verification lock and SIGKILL its recorded check group if that exact
+        process is still alive. Neither path needs a code fingerprint.
         """
         with self.s.tx():
             run = self.s.run(rid)
@@ -487,6 +561,7 @@ class Engine:
             run['completion_requested'] = False
             if cancel:
                 run.setdefault('closed_at', now())
+            self.release_verification(run, 'run cancelled' if cancel else 'run paused')
             for task in self.s.tasks(rid):
                 if cancel and (task['status'] in ACTIVE or task.get('claims_held')):
                     task['status'] = 'cancelled'
@@ -506,7 +581,9 @@ class Engine:
         Only reserved/running/uncertain tasks need confirmation that their
         worker stopped; with --workers-stopped they become failed/interrupted.
         awaiting_validation tasks (worker known stopped) keep their status and
-        stay finish-able.
+        stay finish-able. A stale verification lock is cleared automatically;
+        a live one needs --workers-stopped, which clears it and kills the
+        recorded check group.
         """
         snapshot = capture(self.s.project)
         with self.s.tx():
@@ -518,6 +595,9 @@ class Engine:
             if snapshot['digest'] != run.get('last_snapshot', run['baseline']['digest']) and not accept_drift:
                 raise HarnessError('Worktree/HEAD differs: inspect changes, then --accept-drift')
             active = [t for t in self.s.tasks(rid) if t['status'] in ACTIVE]
+            lock = run.get('verification')
+            if lock and not self.verification_live(lock):
+                self.release_verification(run, 'verify process no longer running')
             if (active or run.get('verification')) and not workers_stopped:
                 raise HarnessError('Confirm old workers/verification process stopped; no automatic duplicate dispatch')
             if session:
@@ -534,7 +614,7 @@ class Engine:
                         task['attempts'][-1]['status'] = 'interrupted'
                         task['attempts'][-1]['ended'] = now()
                     self.s.save_task(task)
-                run['verification'] = None
+                self.release_verification(run, 'resume --workers-stopped')
             run['status'] = 'running'
             run['last_snapshot'] = snapshot['digest']
             run['completion_requested'] = False

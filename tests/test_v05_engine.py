@@ -5,13 +5,17 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import signal
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from als_harness.state import Store, locate, evidence_root
 from als_harness import verify
 from als_harness.engine import Engine
-from als_harness.common import HarnessError, redact, relative
+from als_harness.common import HarnessError, process_alive, process_start, redact, relative
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 class EngineCase(unittest.TestCase):
@@ -306,6 +310,147 @@ class LifecycleTests(EngineCase):
             self.e.pause(rid, 'cancel anyway', cancel=True)
         self.assertEqual(self.s.run(rid)['status'], 'cancelled')
         self.assertFalse(self.s.task(rid, 'two')['claims_held'])
+
+
+class VerificationLockTests(EngineCase):
+    SLOW = [sys.executable, '-c', 'import time; time.sleep(60)']
+
+    def spawn_verify(self, rid):
+        code = ('import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path;'
+                'from als_harness.state import Store; from als_harness.engine import Engine;'
+                'from als_harness import verify;'
+                'verify.verify(Engine(Store(Path(sys.argv[2]))), sys.argv[3], execute_commands=True)')
+        proc = subprocess.Popen([sys.executable, '-c', code, str(REPO), str(self.project), rid],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(self.reap, proc)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            lock = self.s.run(rid).get('verification') or {}
+            if lock.get('pgid'):
+                return proc, lock
+            time.sleep(.05)
+        self.fail('verify never recorded its check process group')
+
+    def reap(self, proc):
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+    def wait_dead(self, pid, start):
+        deadline = time.monotonic() + 5
+        while process_alive(pid, start) and time.monotonic() < deadline:
+            time.sleep(.05)
+        return not process_alive(pid, start)
+
+    def test_lock_records_owner_and_check_group(self):
+        rid = self.start(argv=self.SLOW)
+        proc, lock = self.spawn_verify(rid)
+        self.assertEqual(lock['pid'], proc.pid)
+        self.assertEqual(lock['pgid_start'], process_start(lock['pgid']))
+        self.assertEqual(lock['check'], 'unit')
+        self.e.pause(rid, 'stop')
+        self.assertTrue(self.wait_dead(lock['pgid'], lock['pgid_start']))
+
+    def test_sigkilled_verify_lock_is_cleared_automatically(self):
+        rid = self.start([self.task('one')], argv=self.SLOW)
+        proc, lock = self.spawn_verify(rid)
+        with self.s.tx():
+            self.assertEqual(len(self.e.live_verifications()), 1)
+        proc.kill()
+        proc.wait()
+        self.assertTrue(self.e.reserve(rid, 'one', 'c1')['allowed'])
+        self.assertIsNone(self.s.run(rid)['verification'])
+        self.assertTrue(self.wait_dead(lock['pgid'], lock['pgid_start']))
+        event = self.s.get('events', 'verification-cleared:' + lock['ticket'], col='key')
+        self.assertEqual(event['reason'], 'verify process no longer running')
+        self.assertTrue(event['check_group_killed'])
+
+    def test_pause_and_cancel_clear_live_lock_and_kill_check(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                rid = self.start(argv=self.SLOW)
+                proc, lock = self.spawn_verify(rid)
+                self.e.pause(rid, 'operator stop', cancel=cancel)
+                self.assertIsNone(self.s.run(rid)['verification'])
+                self.assertTrue(self.wait_dead(lock['pgid'], lock['pgid_start']))
+                proc.wait(timeout=20)
+                self.assertEqual(self.s.run(rid)['evidence'], {})
+
+    def test_resume_requires_ack_for_live_lock_then_clears_it(self):
+        rid = self.start(argv=self.SLOW)
+        proc, lock = self.spawn_verify(rid)
+        with self.assertRaises(HarnessError):
+            self.e.resume(rid)
+        self.e.resume(rid, workers_stopped=True)
+        self.assertIsNone(self.s.run(rid)['verification'])
+        self.assertTrue(self.wait_dead(lock['pgid'], lock['pgid_start']))
+        proc.wait(timeout=20)
+        self.assertEqual(self.s.run(rid)['evidence'], {})
+
+    def test_recycled_pid_lock_is_stale_and_foreign_group_is_never_killed(self):
+        rid = self.start()
+        bystander = subprocess.Popen(self.SLOW, start_new_session=True)
+        self.addCleanup(self.reap, bystander)
+        me = os.getpid()
+        with self.s.tx():
+            run = self.s.run(rid)
+            run['verification'] = {'ticket': 'forged', 'pid': me, 'pid_start': (process_start(me) or 0) + 1,
+                                   'boot_id': None, 'started': 0, 'pgid': bystander.pid,
+                                   'pgid_start': (process_start(bystander.pid) or 0) + 1, 'check': 'unit'}
+            self.s.save_run(run)
+        self.assertTrue(verify.verify(self.e, rid, execute_commands=True)['passed'])
+        self.assertIsNone(bystander.poll())
+
+    def test_legacy_lock_from_dead_process_is_cleared(self):
+        rid = self.start()
+        dead = subprocess.Popen([sys.executable, '-c', 'pass'])
+        dead.wait()
+        with self.s.tx():
+            run = self.s.run(rid)
+            run['verification'] = {'ticket': 'old', 'started': 0, 'pid': dead.pid}
+            self.s.save_run(run)
+        self.assertTrue(verify.verify(self.e, rid, execute_commands=True)['passed'])
+        self.assertTrue(self.e.complete(rid)['completed'])
+
+
+class ProcessIdentityFallbackTests(unittest.TestCase):
+    def test_ps_fallback_without_proc(self):
+        from als_harness import common
+        real_read = Path.read_bytes
+
+        def no_proc(path):
+            if str(path).startswith('/proc/'):
+                raise FileNotFoundError(path)
+            return real_read(path)
+
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        with patch.object(common.sys, 'platform', 'darwin'), patch.object(Path, 'read_bytes', no_proc):
+            start = common.process_start(child.pid)
+            self.assertIsInstance(start, str)
+            self.assertTrue(common.process_alive(child.pid, start))
+            self.assertFalse(common.process_alive(child.pid, start + ' recycled'))
+            child.kill()
+            child.wait()
+            self.assertFalse(common.process_alive(child.pid, start))
+
+
+class TaskCheckConcurrencyTests(EngineCase):
+    def test_task_check_runs_beside_read_only_and_other_run_writers(self):
+        rid = self.start([self.task('scan', None, 'als_explorer'), self.task('edit')], session='s1')
+        other = self.start([self.task('elsewhere', 'other.py')], session='s2')
+        self.e.reserve(rid, 'scan', 'c1')
+        self.e.reserve(other, 'elsewhere', 'c2')
+        self.assertTrue(verify.verify(self.e, rid, 'unit', execute_commands=True)['passed'])
+        with self.assertRaises(HarnessError):
+            verify.verify(self.e, rid, execute_commands=True)
+
+    def test_task_check_refused_while_this_run_holds_write_claim(self):
+        rid = self.start([self.task('edit')])
+        self.e.reserve(rid, 'edit', 'c1')
+        with self.assertRaises(HarnessError):
+            verify.verify(self.e, rid, 'unit', execute_commands=True)
 
 
 if __name__ == '__main__':

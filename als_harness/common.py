@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import subprocess
+import sys
 import time
 
 
@@ -115,25 +117,59 @@ def redact(value):
     return _SECRET_LITERAL.sub('[REDACTED]', text)
 
 
-def boot_id():
-    """Identity of the current kernel boot, or None where /proc is unavailable."""
+def _command_output(argv):
     try:
-        return Path('/proc/sys/kernel/random/boot_id').read_text().strip() or None
-    except OSError:
+        # C locale keeps ps/sysctl output stable across user locales.
+        result = subprocess.run(argv, capture_output=True, timeout=5, env=dict(os.environ, LC_ALL='C'))
+    except (OSError, subprocess.SubprocessError):
         return None
+    text = result.stdout.decode('utf-8', 'replace').strip()
+    return text if result.returncode == 0 and text else None
+
+
+def boot_id():
+    """Identity of the current boot: Linux boot_id, else BSD/macOS
+    kern.boottime; None when neither is available."""
+    try:
+        value = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        if value:
+            return value
+    except OSError:
+        pass
+    if sys.platform.startswith('linux'):
+        return None
+    return _command_output(['sysctl', '-n', 'kern.boottime'])
 
 
 def process_info(pid):
-    """(state letter, start time in clock ticks) from /proc, or None."""
+    """(state, start time) of pid, or None when unavailable.
+
+    Linux reads /proc/<pid>/stat (start in clock ticks since boot). Other
+    POSIX systems (macOS) fall back to `ps -o stat=,lstart=`; the start is
+    then an opaque string, compared only with values recorded on the same
+    host.
+    """
     try:
-        data = Path('/proc/' + str(int(pid)) + '/stat').read_bytes()
-    except (OSError, ValueError):
+        pid = int(pid)
+    except (TypeError, ValueError):
         return None
-    fields = data[data.rindex(b')') + 2:].split()
     try:
-        return fields[0].decode(), int(fields[19])
-    except (IndexError, ValueError):
+        data = Path('/proc/' + str(pid) + '/stat').read_bytes()
+    except OSError:
+        data = None
+    if data is not None:
+        fields = data[data.rindex(b')') + 2:].split()
+        try:
+            return fields[0].decode(), int(fields[19])
+        except (IndexError, ValueError):
+            return None
+    if sys.platform.startswith('linux'):
         return None
+    line = _command_output(['ps', '-o', 'stat=,lstart=', '-p', str(pid)])
+    if not line or len(line.split(None, 1)) != 2:
+        return None
+    state, started = line.split(None, 1)
+    return state[0], ' '.join(started.split())
 
 
 def process_start(pid):

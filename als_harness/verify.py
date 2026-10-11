@@ -7,14 +7,19 @@ import signal
 import subprocess
 import time
 import uuid
-from .common import ACTIVE, HarnessError, checked_path, digest, now, private_dir, redact
+from .common import ACTIVE, HarnessError, checked_path, digest, now, process_start, redact
+from .engine import holds_claim
 from .snapshot import capture
 
 MAX_LOG = 65536
 
 
-def execute(argv, project, timeout):
-    """Bounded memory/time; kill ONLY our process group on timeout/leftover pipes."""
+def execute(argv, project, timeout, on_spawn=None):
+    """Bounded memory/time; kill ONLY our process group on timeout/leftover pipes.
+
+    on_spawn(proc) runs before any waiting so the caller can persist the new
+    process group; if it raises, the group is killed and the error propagates.
+    """
     proc = subprocess.Popen(argv, cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, start_new_session=True)
     data = bytearray()
@@ -24,6 +29,8 @@ def execute(argv, project, timeout):
     selector.register(proc.stdout, selectors.EVENT_READ)
     deadline = time.monotonic() + timeout
     try:
+        if on_spawn is not None:
+            on_spawn(proc)
         while selector.get_map():
             if time.monotonic() >= deadline:
                 expired = True
@@ -54,7 +61,22 @@ def execute(argv, project, timeout):
             'log': redact(data.decode('utf-8', errors='replace'))}
 
 
+def _write_claim(task):
+    return bool(task['write_paths']) and (holds_claim(task) or bool(task.get('claims_held')))
+
+
 def verify(engine, rid, check_id=None, execute_commands=False):
+    """Run declared checks under the global verification lock.
+
+    Final verification (no check_id) requires that no non-terminal run has
+    an active worker or a held write claim. A task-level check (check_id)
+    may run while other work is active, provided THIS run holds no write
+    claim: read-only workers anywhere and writers in other runs do not
+    block it, and a concurrent code change is still detected by the
+    before/after snapshot and fails the check. The lock records this
+    process and, before waiting, the check's process group so a stale lock
+    (killed verify process) can be detected and cleared.
+    """
     s = engine.s
     if not execute_commands:
         run = s.run(rid)
@@ -63,18 +85,34 @@ def verify(engine, rid, check_id=None, execute_commands=False):
     before = capture(s.project)
     ticket = uuid.uuid4().hex
     with s.tx():
+        if engine.live_verifications():
+            raise HarnessError('Another verification owns the worktree')
         run = s.run(rid)
         if run['status'] != 'running':
             raise HarnessError('Verification requires running run')
-        if any(t['status'] in ACTIVE or (t['write_paths'] and t.get('claims_held')) for t in engine.live_tasks()):
+        live = engine.live_tasks()
+        if check_id:
+            if any(_write_claim(t) for t in live if t['run'] == rid):
+                raise HarnessError('Finish or release this run\'s write claims before task-level checks')
+        elif any(t['status'] in ACTIVE or _write_claim(t) for t in live):
             raise HarnessError('Stop/finish active workers and release write claims before final checks')
-        if any(x.get('verification') for x in s.runs()):
-            raise HarnessError('Another verification owns the worktree')
         checks = [c for c in run['plan']['checks'] if not check_id or c['id'] == check_id]
         if not checks:
             raise HarnessError('No matching checks')
-        run['verification'] = {'ticket': ticket, 'started': now(), 'pid': os.getpid()}
+        run['verification'] = engine.new_verification_lock(ticket)
         s.save_run(run)
+
+    def lost_lock(run):
+        return (run.get('verification') or {}).get('ticket') != ticket or run['status'] != 'running'
+
+    def record_group(proc, check_id):
+        with s.tx():
+            run = s.run(rid)
+            if lost_lock(run):
+                raise HarnessError('Run paused/cancelled/reconciled while verification was running; evidence not accepted')
+            run['verification'].update(pgid=proc.pid, pgid_start=process_start(proc.pid), check=check_id)
+            s.save_run(run)
+
     results = []
     try:
         folder = s.evidence_dir(rid)
@@ -82,7 +120,8 @@ def verify(engine, rid, check_id=None, execute_commands=False):
             record = {'id': check['id'], 'argv': check['argv'], 'cwd': str(s.project), 'stamp': now(),
                       'snapshot': before['digest']}
             try:
-                outcome = execute(check['argv'], s.project, check['timeout'])
+                outcome = execute(check['argv'], s.project, check['timeout'],
+                                  on_spawn=lambda proc, key=check['id']: record_group(proc, key))
             except OSError as ex:
                 outcome = {'exit_code': None, 'timed_out': False, 'truncated': False, 'log': type(ex).__name__}
             after = capture(s.project)
@@ -99,8 +138,9 @@ def verify(engine, rid, check_id=None, execute_commands=False):
             record['log_sha256'] = digest(outcome['log'].encode())
             with s.tx():
                 run = s.run(rid)
-                if (run.get('verification') or {}).get('ticket') != ticket or run['status'] != 'running':
+                if lost_lock(run):
                     raise HarnessError('Run paused/cancelled/reconciled while verification was running; evidence not accepted')
+                run['verification'].update(pgid=None, pgid_start=None, check=None)
                 run['evidence'][check['id']] = record
                 run['last_snapshot'] = after['digest']
                 s.save_run(run)
