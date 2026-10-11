@@ -1,6 +1,6 @@
-"""Reversible, fail-closed Codex TOML overlay. Python 3.11+, stdlib only.
+"""Reversible, fail-closed Codex TOML overlay. Stdlib tomllib (3.11+) or tomli.
 
-Text is preserved outside ALS-owned assignments. tomllib validates BOTH the
+Text is preserved outside ALS-owned assignments. The TOML parser validates BOTH the
 input/output and equality of every unmanaged value (including array tables).
 Unsupported multiline/inline assignment forms are rejected before any write.
 Legacy manifest/block hashes remain readable so the 0.1 installer can upgrade.
@@ -12,7 +12,15 @@ import copy
 import hashlib
 import math
 import re
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9/3.10
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        tomllib = None
+TOML_MISSING = ("Python 3.11+ (or tomli) is needed only to merge config.toml; "
+                "use --global, run the installer with python3.11+, or `pip install tomli`")
 
 ROOT_BEGIN = "# ALS:ROOT:BEGIN\n"
 ROOT_END = "# ALS:ROOT:END\n"
@@ -26,10 +34,60 @@ AGENT_KEYS = {
     "max_depth": "1", "default_subagent_model": '"gpt-6-luna"',
     "default_subagent_reasoning_effort": '"max"',
 }
-# Detect EVERY table boundary, not just [table]. Strict parse below validates it.
-HEADER = re.compile(r"^[ \t]*\[", re.M)
+# Detect EVERY table boundary, not just [table]. Only lines at bracket depth 0
+# can be headers (see table_headers); strict parsing below validates the rest.
+HEADER = re.compile(r"^[ \t]*\[")
 AGENTS_HEADER = re.compile(r'^\s*\[(?:agents|"agents"|\'agents\')\]\s*(?:#.*)?$')
 KEY = re.compile(r'^\s*([A-Za-z_][\w-]*)\s*=')
+
+
+def _toml():
+    if tomllib is None:
+        raise ValueError(TOML_MISSING)
+    return tomllib
+
+
+def _depth_change(line: str) -> int:
+    """Net [/{ nesting of one physical line, ignoring strings and comments."""
+    depth, quote, index = 0, None, 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if quote == '"' and char == "\\":
+                index += 1
+            elif char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "#":
+            break
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+        index += 1
+    return depth
+
+
+def table_headers(lines: list[str]) -> list[bool]:
+    """Per line: is it a [table]/[[array]] header (not a nested array value)?"""
+    flags, depth = [], 0
+    for line in lines:
+        header = depth <= 0 and bool(HEADER.match(line))
+        flags.append(header)
+        if not header:
+            depth = max(0, depth + _depth_change(line))
+    return flags
+
+
+def risky_settings(data: dict) -> list[str]:
+    """Unmanaged root settings worth a warning; ALS never changes them."""
+    out = []
+    if data.get("approval_policy") == "never":
+        out.append('approval_policy = "never"')
+    if data.get("sandbox_mode") == "danger-full-access":
+        out.append('sandbox_mode = "danger-full-access"')
+    return out
 
 
 def sha(text: str) -> str:
@@ -38,8 +96,8 @@ def sha(text: str) -> str:
 
 def parse(text: str) -> dict:
     try:
-        return tomllib.loads(text)
-    except tomllib.TOMLDecodeError as ex:
+        return _toml().loads(text)
+    except _toml().TOMLDecodeError as ex:
         raise ValueError("Invalid Codex TOML; no changes made: " + str(ex)) from ex
 
 
@@ -70,10 +128,10 @@ def unmanaged(data: dict) -> dict:
 
 def validate_defaults(data: dict) -> None:
     for key, value in ROOT_KEYS.items():
-        if data.get(key) != tomllib.loads("v=" + value)["v"]:
+        if data.get(key) != _toml().loads("v=" + value)["v"]:
             raise ValueError("Root model setting not applied: " + key)
     for key, value in AGENT_KEYS.items():
-        if data.get("agents", {}).get(key) != tomllib.loads("v=" + value)["v"]:
+        if data.get("agents", {}).get(key) != _toml().loads("v=" + value)["v"]:
             raise ValueError("Agent setting not applied: " + key)
     if "max_threads" in data.get("agents", {}):
         raise ValueError("Conflicting legacy max_threads alias remains")
@@ -113,9 +171,9 @@ def restore(content: str, state: dict) -> str:
         generated = "\n" + CREATED + "[agents]\n"
         if content.count(generated) != 1:
             raise ValueError("Generated agents header changed")
-        after = content.split(generated, 1)[1]
-        boundary = HEADER.search(after)
-        body = after[:boundary.start()] if boundary else after
+        after = content.split(generated, 1)[1].splitlines(keepends=True)
+        flags = table_headers(after)
+        body = "".join(after[:flags.index(True)] if True in flags else after)
         if any(x.strip() and not x.lstrip().startswith("#") for x in body.splitlines()):
             # Keep user-added agents settings, but remove our ownership comment.
             content = content.replace(CREATED, "", 1)
@@ -147,8 +205,12 @@ def merge(original: str) -> tuple[str, dict]:
         raise ValueError("Inline/dotted agents table requires manual merge")
     scope, replaced = "root", {"root": set(), "agents": set()}
     body, header_added_eol = [], None
-    for line in lines:
-        if HEADER.match(line):
+    depth = 0
+    for line, is_header in zip(lines, table_headers(lines)):
+        nested = depth > 0
+        if not is_header:
+            depth = max(0, depth + _depth_change(line))
+        if is_header:
             scope = "agents" if AGENTS_HEADER.fullmatch(line.rstrip("\r\n")) else "other"
             body.append(line)
             if scope == "agents":
@@ -157,7 +219,7 @@ def merge(original: str) -> tuple[str, dict]:
                     body.append("\n")
                 body.append(block(AGENTS_BEGIN, AGENTS_END, AGENT_KEYS))
             continue
-        match = KEY.match(line)
+        match = None if nested else KEY.match(line)
         key = match.group(1) if match else None
         owned = ROOT_KEYS if scope == "root" else {**AGENT_KEYS, "max_threads": ""} if scope == "agents" else {}
         if key in owned:
@@ -189,6 +251,20 @@ def merge(original: str) -> tuple[str, dict]:
     if restore(merged, state) != original:
         raise ValueError("Byte-exact restoration failed; refusing all writes")
     return merged, state
+
+
+def adopt_state(content: str) -> dict:
+    """Rebuild a merged-overlay state from intact ALS markers (manifest lost)."""
+    root = get_block(content, ROOT_BEGIN, ROOT_END)
+    agents = get_block(content, AGENTS_BEGIN, AGENTS_END)
+    if root != block(ROOT_BEGIN, ROOT_END, ROOT_KEYS) or agents != block(AGENTS_BEGIN, AGENTS_END, AGENT_KEYS):
+        raise ValueError("ALS config markers do not match this release; manual review required")
+    backups = [x for x in content.splitlines(keepends=True) if x.startswith(BACKUP)]
+    state = {"mode": "merged", "format": 2, "root_hash": sha(root), "agent_hash": sha(agents),
+             "backups_hash": sha("".join(backups)), "generated_agents": CREATED in content,
+             "header_added_eol": None}
+    check(content, state)
+    return state
 
 
 def check(content: str, state: dict) -> None:

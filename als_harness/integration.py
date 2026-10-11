@@ -1,50 +1,232 @@
-"""Coexist with user Codex hooks. Merge only exact ALS-owned JSON groups."""
+"""Coexist with user Codex hooks. Merge only exact ALS-owned JSON groups.
+
+Hook commands are relocatable (0.5): a project install resolves the main
+repository root at run time through git, so moving the project or opening a
+forked worktree/subdirectory keeps working. A global install points at the
+shared ALS home, written as ``$HOME/...`` when it lives under the home dir.
+"""
 from __future__ import annotations
+
+import base64
 import copy
 import json
+import os
 from pathlib import Path
+import re
 import shlex
+
 from .common import HarnessError, digest
 
-HOOK_EVENTS=('SessionStart','PreToolUse','PostToolUse','SubagentStart','SubagentStop','Stop','SessionEnd')
+HOOK_EVENTS = (
+    'SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart',
+    'SubagentStop', 'Stop', 'SessionEnd',
+)
+# Codex compiles a group's "matcher" as a pattern over the tool name; only the
+# spawn tool matters to the harness, so other tool calls skip the process start.
+SPAWN_MATCHER = 'spawn_agent'
+MATCHED_EVENTS = {'PreToolUse', 'PostToolUse'}
+# Portable to old git (no --path-format): --git-common-dir may be relative to
+# the cwd, so resolve it with cd/pwd. Works from subdirectories and worktrees.
+PROJECT_SCRIPT = '"$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/.astra-luna-sol/harness.py"'
+PROJECT_COMMAND = 'python3 ' + PROJECT_SCRIPT + ' hook'
+DEFAULT_PYTHON = 'python3'
 
-def groups(project):
-    command='python3 '+shlex.quote(str(project/'.astra-luna-sol/harness.py'))+' --project '+shlex.quote(str(project))+' hook'
-    out={}
+# Any handler that runs a harness.py entrypoint in hook mode: 0.3/0.4 used an
+# absolute path plus --project; 0.5 uses the project/global forms built below.
+ALS_COMMAND = re.compile(r'''harness\.py["']?\s+(?:--project\s+\S+\s+)?hook\b''')
+
+
+def _escape_double_quoted(text):
+    return re.sub(r'(["\\$`])', r'\\\1', text)
+
+
+def interpreter(python=None):
+    """'python3' from PATH (default) or a shell-quoted absolute interpreter."""
+    if not python or python == DEFAULT_PYTHON:
+        return DEFAULT_PYTHON
+    if not os.path.isabs(python):
+        raise HarnessError('Hook interpreter must be python3 or an absolute path')
+    return shlex.quote(python)
+
+
+def home_command(als_home, home=None, python=None):
+    """Shell command for a global install; ``$HOME/...`` when under HOME."""
+    target = Path(als_home).expanduser().resolve() / 'harness.py'
+    home = Path(home or os.environ.get('HOME') or Path.home()).resolve()
+    try:
+        rel = target.relative_to(home)
+    except ValueError:
+        return interpreter(python) + ' ' + shlex.quote(str(target)) + ' hook'
+    return interpreter(python) + ' "$HOME/' + _escape_double_quoted(rel.as_posix()) + '" hook'
+
+
+def command(scope='project', als_home=None, python=None):
+    if isinstance(scope, Path):
+        scope = 'project'  # pre-0.5 callers passed the project path
+    if scope == 'project':
+        return interpreter(python) + ' ' + PROJECT_SCRIPT + ' hook'
+    if scope == 'global':
+        if als_home is None:
+            raise HarnessError('Global hook scope requires the ALS home path')
+        return home_command(als_home, python=python)
+    raise HarnessError('Unknown hook scope: ' + str(scope))
+
+
+def groups(scope='project', als_home=None, python=None) -> dict:
+    """ALS-owned hook groups. No absolute project path is embedded."""
+    cmd = command(scope, als_home, python)
+    out = {}
     for event in HOOK_EVENTS:
-        handler={'type':'command','command':command,'timeout':3 if event=='SessionEnd' else 10,'statusMessage':'ALS harness'}
-        if event in {'SessionStart','SubagentStart','PreToolUse'}:handler['additionalContextLimit']=500
-        out[event]={'hooks':[handler]}
+        handler = {
+            'type': 'command',
+            'command': cmd,
+            'timeout': 3 if event == 'SessionEnd' else 10,
+            'statusMessage': 'ALS harness',
+        }
+        if event in {'SessionStart', 'SubagentStart', 'PreToolUse'}:
+            handler['additionalContextLimit'] = 500
+        group = {'hooks': [handler]}
+        if event in MATCHED_EVENTS:
+            group = {'matcher': SPAWN_MATCHER, **group}
+        out[event] = group
     return out
 
+
+def legacy_project(state):
+    """Absolute project path baked into a 0.3/0.4 manifest's hook groups."""
+    for group in (state or {}).get('groups', {}).values():
+        for handler in group.get('hooks', []) if isinstance(group, dict) else []:
+            cmd = handler.get('command', '') if isinstance(handler, dict) else ''
+            if ' --project ' in cmd and cmd.endswith(' hook'):
+                try:
+                    parts = shlex.split(cmd)
+                except ValueError:
+                    return None
+                return parts[parts.index('--project') + 1]
+    return None
+
+
 def parse(raw):
-    try:data=json.loads(raw) if raw is not None else {}
-    except (ValueError,UnicodeError) as ex:raise HarnessError('Invalid existing hooks.json') from ex
-    if not isinstance(data,dict) or not isinstance(data.get('hooks',{}),dict):raise HarnessError('Unsupported hooks configuration shape')
-    if any(not isinstance(v,list) for v in data.get('hooks',{}).values()):raise HarnessError('Hook events must contain matcher group arrays')
+    try:
+        data = json.loads(raw) if raw is not None else {}
+    except (ValueError, UnicodeError) as ex:
+        raise HarnessError('Invalid existing hooks.json') from ex
+    if not isinstance(data, dict) or not isinstance(data.get('hooks', {}), dict):
+        raise HarnessError('Unsupported hooks configuration shape')
+    if any(not isinstance(v, list) for v in data.get('hooks', {}).values()):
+        raise HarnessError('Hook events must contain matcher group arrays')
     return data
 
-def remove(raw,state):
-    data=parse(raw)
-    for event,owned in state['groups'].items():
-        current=data.get('hooks',{}).get(event,[])
-        matches=[i for i,x in enumerate(current) if x==owned]
-        if len(matches)!=1:raise HarnessError('Edited/missing/duplicated ALS hook '+event+'; inspect before reinstall')
-        del current[matches[0]]
-        if not current and event not in state['prior_events']:data['hooks'].pop(event,None)
-    if not data.get('hooks') and not state['prior_hooks_key']:data.pop('hooks',None)
-    return None if state['created'] and not data else (json.dumps(data,ensure_ascii=False,indent=2)+'\n').encode()
 
-def merge(raw,old_state,project):
-    if old_state:raw=remove(raw,old_state)
-    data=parse(raw);before=copy.deepcopy(data)
-    owned=groups(project)
+def serialize(data):
+    return (json.dumps(data, ensure_ascii=False, indent=2) + '\n').encode()
+
+
+def original_bytes(state):
+    encoded = (state or {}).get('original_b64')
+    if encoded is None:
+        return None
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except ValueError as ex:
+        raise HarnessError('Corrupt hooks restoration data in manifest') from ex
+
+
+def untouched(raw, state):
+    """True when the file is exactly what ALS wrote (byte-exact restore is safe)."""
+    return raw is not None and state.get('installed_sha256') == digest(raw)
+
+
+def remove(raw, state):
+    """Splice ALS groups out; restore the pre-install bytes when nothing else changed."""
+    original = original_bytes(state)
+    if original is not None and untouched(raw, state):
+        return original
+    data = parse(raw)
+    for event, owned in state['groups'].items():
+        current = data.get('hooks', {}).get(event, [])
+        matches = [i for i, x in enumerate(current) if x == owned]
+        if len(matches) != 1:
+            raise HarnessError('Edited/missing/duplicated ALS hook ' + event + '; inspect before reinstall')
+        del current[matches[0]]
+        if not current and event not in state['prior_events']:
+            data['hooks'].pop(event, None)
+    if not data.get('hooks') and not state['prior_hooks_key']:
+        data.pop('hooks', None)
+    if state['created'] and not data:
+        return None
+    return serialize(data)
+
+
+def unmanaged_changed(raw, state):
+    """ALS groups are intact but other hook definitions changed since install."""
+    if raw is None or not state or untouched(raw, state) or 'installed_sha256' not in state:
+        return False
+    try:
+        rest = remove(raw, state)
+    except HarnessError:
+        return False
+    before = original_bytes(state)
+    if before is None and state.get('created'):
+        return rest is not None
+    return before is not None and parse(rest) != parse(before)
+
+
+def has_als_handler(data):
+    for event_groups in data.get('hooks', {}).values():
+        for group in event_groups:
+            handlers = group.get('hooks', []) if isinstance(group, dict) else []
+            for handler in handlers if isinstance(handlers, list) else []:
+                cmd = handler.get('command') if isinstance(handler, dict) else None
+                if isinstance(cmd, str) and ALS_COMMAND.search(cmd):
+                    return True
+    return False
+
+
+def merge(raw, old_state, scope='project', als_home=None, python=None):
+    if old_state:
+        raw = remove(raw, old_state)
+    data = parse(raw)
+    before = copy.deepcopy(data)
+    owned = groups(scope, als_home, python)
     # Refuse orphan ALS handlers rather than stacking a second installation.
-    if '.astra-luna-sol/harness.py' in json.dumps(data):raise HarnessError('Unowned ALS hook command found')
-    existing=data.setdefault('hooks',{})
-    for event,group in owned.items():existing.setdefault(event,[]).append(group)
-    state={'created':raw is None,'prior_hooks_key':'hooks' in before,
-           'prior_events':list(before.get('hooks',{})),'groups':owned}
-    new=(json.dumps(data,ensure_ascii=False,indent=2)+'\n').encode()
-    if parse(remove(new,state))!=before:raise HarnessError('Unmanaged hook definitions changed')
-    return new,state
+    if has_als_handler(data):
+        raise HarnessError('Unowned ALS hook command found in hooks.json; remove it or use --adopt')
+    existing = data.setdefault('hooks', {})
+    for event, group in owned.items():
+        existing.setdefault(event, []).append(group)
+    new = serialize(data)
+    state = {
+        'created': raw is None,
+        'prior_hooks_key': 'hooks' in before,
+        'prior_events': list(before.get('hooks', {})),
+        'groups': owned,
+        'installed_sha256': digest(new),
+        'original_b64': base64.b64encode(raw).decode('ascii') if raw is not None else None,
+    }
+    spliced = dict(state, original_b64=None, installed_sha256=None)
+    if parse(remove(new, spliced)) != before:
+        raise HarnessError('Unmanaged hook definitions changed')
+    return new, state
+
+
+def adopt(raw, scope='project', als_home=None, python=None):
+    """Synthesize ownership of exact current ALS groups found without a manifest."""
+    if raw is None:
+        return None
+    data = parse(raw)
+    owned = groups(scope, als_home, python)
+    hooks = data.get('hooks', {})
+    for event, group in owned.items():
+        if sum(1 for x in hooks.get(event, []) if x == group) != 1:
+            return None
+    prior = [e for e, v in hooks.items() if [x for x in v if x != owned.get(e)]]
+    only_als = not prior and set(data) == {'hooks'}
+    return {
+        'created': only_als,
+        'prior_hooks_key': not only_als,
+        'prior_events': prior,
+        'groups': owned,
+        'installed_sha256': None,
+        'original_b64': None,
+    }

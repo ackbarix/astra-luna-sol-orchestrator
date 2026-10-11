@@ -1,6 +1,9 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import sys
+if sys.version_info < (3, 11):  # scripts/check-runtime.py itself requires 3.11
+    raise unittest.SkipTest('needs Python 3.11+ (tomllib, check-runtime.py)')
 import tomllib
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('checker',ROOT/'scripts/check-runtime.py');checker=importlib.util.module_from_spec(spec);spec.loader.exec_module(checker)

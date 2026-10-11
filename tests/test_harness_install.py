@@ -5,6 +5,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+try:
+    import tomllib  # noqa: F401
+except ModuleNotFoundError:  # Python 3.9/3.10: installer tests need tomllib or tomli
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        raise unittest.SkipTest('needs tomllib (3.11+) or tomli')
 import install
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -86,13 +93,14 @@ class HarnessInstallTests(unittest.TestCase):
         self.assertEqual(ignore.read_bytes(),old)
         self.assertEqual((runtime/'keep').read_text(),'do-not-remove')
 
-    def test_unowned_identical_ignore_without_runtime_not_adopted(self):
+    def test_identical_ignore_without_runtime_is_adopted(self):
+        # 0.5: a retained release-identical ignore file is adopted even after
+        # the user deleted state/evidence (previously a reinstall dead end).
         target=self.p/'.astra-luna-sol'
         target.mkdir()
         (target/'.gitignore').write_bytes((ROOT/'profiles/runtime.gitignore').read_bytes())
         result=self.call('--dry-run')
-        self.assertEqual(result.returncode,2)
-        self.assertIn('User-owned path already exists',result.stderr)
+        self.assertEqual(result.returncode,0,result.stderr)
         self.assertFalse((target/'manifest.json').exists())
 
     def test_hooks_removed_when_skip_selected(self):
