@@ -141,7 +141,7 @@ class EaseTests(unittest.TestCase):
             code, out, _ = self.main('doctor')
             self.assertEqual(json.loads(out)['deps']['items'][0]['name'], 'git')
             code, text, _ = self.main('doctor', '--format', 'text')
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)  # r3: a failing REQUIRED dependency exits 1
         last = text.strip().splitlines()[-1]
         self.assertIn('git', last)
         self.assertIn('install a newer git', last)

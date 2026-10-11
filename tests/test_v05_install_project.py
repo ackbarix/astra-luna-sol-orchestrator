@@ -44,7 +44,8 @@ class InstalledHookTests(base.Sandbox, unittest.TestCase):
         sub = self.p / 'a/b'
         sub.mkdir(parents=True)
         result = self.run_doctor(command, sub)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        # Exit 1 only reports missing required dependencies in the sandbox (r3 doctor exit codes).
+        self.assertIn(result.returncode, (0, 1), result.stderr)
         self.assertTrue(json.loads(result.stdout)['hooks_configured'])
         git = ['git', '-C', str(self.p), '-c', 'user.email=t@t', '-c', 'user.name=t']
         subprocess.run(git + ['add', '-A'], check=True, capture_output=True)
@@ -52,7 +53,8 @@ class InstalledHookTests(base.Sandbox, unittest.TestCase):
         worktree = self.base / 'fork'
         subprocess.run(git + ['worktree', 'add', '-q', str(worktree)], check=True, capture_output=True)
         result = self.run_doctor(command, worktree)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        self.assertTrue(json.loads(result.stdout)['hooks_configured'])
 
     def test_project_move_keeps_hooks_valid(self):
         self.ok(self.proj())

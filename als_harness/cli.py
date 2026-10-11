@@ -118,82 +118,133 @@ def default_session(store, mode):
     return None, None, problem + ' Observe run started without a session; usage/hook linkage disabled.'
 
 
-def hooks_file(project, scope):
-    if scope == 'project':
-        return checked_path(project, '.codex/hooks.json')
-    return Path(os.environ.get('CODEX_HOME') or '~/.codex').expanduser() / 'hooks.json'
+def hooks_files(project):
+    """Hook files doctor inspects, in order: the project's .codex/hooks.json
+    (project installs and `--hooks-only` installs) then $CODEX_HOME/hooks.json
+    (global installs). Both scopes check both; Codex loads both layers."""
+    files = []
+    try:
+        files.append(checked_path(project, '.codex/hooks.json'))
+    except HarnessError:
+        pass  # symlinked .codex: never followed
+    files.append(Path(os.environ.get('CODEX_HOME') or '~/.codex').expanduser() / 'hooks.json')
+    return files
+
+
+# A handler running a harness.py entrypoint in hook mode: the global form
+# `python3 "${HOME:-/abs}/.local/share/als/harness.py" hook`, the project form
+# `c=$(git rev-parse --git-common-dir ...) ... exec python3 "$s" hook`, and 0.4
+# absolute-path forms. Same pattern as integration.ALS_COMMAND.
+ALS_HOOK_COMMAND = re.compile(r'''harness\.py\b.*\shook\s*$''', re.S)
 
 
 def als_command(handler):
     command = handler.get('command') if isinstance(handler, dict) else None
-    return isinstance(command, str) and 'harness.py' in command and re.search(r'\shook(\s|$)', command) is not None
+    return isinstance(command, str) and ALS_HOOK_COMMAND.search(command) is not None
 
 
-def missing_events(doc):
+def configured_events(doc):
     configured = doc.get('hooks') if isinstance(doc, dict) else None
     if not isinstance(configured, dict):
-        return list(DOCTOR_EVENTS)
-    missing = []
+        return set()
+    found = set()
     for event in DOCTOR_EVENTS:
         groups = configured.get(event)
         groups = groups if isinstance(groups, list) else []
-        if not any(isinstance(g, dict) and isinstance(g.get('hooks'), list) and any(als_command(h) for h in g['hooks'])
-                   for g in groups):
-            missing.append(event)
-    return missing
+        if any(isinstance(g, dict) and isinstance(g.get('hooks'), list) and any(als_command(h) for h in g['hooks'])
+               for g in groups):
+            found.add(event)
+    return found
 
 
-def dependency_report(project):
+def missing_events(doc):
+    found = configured_events(doc)
+    return [event for event in DOCTOR_EVENTS if event not in found]
+
+
+def dependency_report(project, probe=True):
     if deps is None:
         return {'ok': None, 'items': [], 'note': 'dependency checker unavailable in this install'}
     try:
-        return deps.check(project)
+        return deps.check(project, probe=probe)
     except Exception as ex:  # a broken checker must not hide the rest of doctor
         return {'ok': None, 'items': [], 'note': 'dependency check failed: ' + type(ex).__name__}
 
 
+def doctor_failed(result):
+    """True when a REQUIRED dependency failed (doctor exits 1). Hook and
+    optional-item problems are warnings: the CLI works without hooks."""
+    return any(not item.get('ok') and item.get('required', True) is not False
+               for item in result.get('deps', {}).get('items', []))
+
+
 def doctor_text(result):
+    where = result.get('hooks_found_in') or {}
     lines = ['ALS doctor (' + result['scope'] + ' scope)',
              'state:  ' + result['state_path'],
              'hooks:  ' + ('configured' if result['hooks_configured'] else 'NOT configured')
-             + ' (' + str(result.get('hooks_file')) + ')']
-    failing = ['FAIL ' + issue for issue in result['issues']]
+             + (' (found in ' + ', '.join(where) + ')' if where
+                else ' (checked ' + ', '.join(result.get('hooks_checked') or []) + ')')]
+    problems = ['warn ' + issue for issue in result['issues']]
     for item in result.get('deps', {}).get('items', []):
-        if not item.get('ok'):
-            failing.append('FAIL ' + str(item.get('name')) + ': found ' + str(item.get('found'))
-                           + ', need ' + str(item.get('required')) + ' -> ' + str(item.get('hint') or ''))
+        if item.get('ok'):
+            continue
+        required = item.get('required', True)
+        mark = 'warn' if required is False else 'FAIL'
+        line = mark + ' ' + str(item.get('name')) + ': found ' + str(item.get('found') or 'nothing')
+        if not isinstance(required, bool) and required is not None:
+            line += ', need ' + str(required)
+        if item.get('hint'):
+            line += ' -> ' + str(item['hint'])
+        problems.append(line)
     if result.get('deps', {}).get('ok') is None:
         lines.append('deps:   not checked (' + str(result.get('deps', {}).get('note')) + ')')
-    lines.append('summary: ' + ('all checks passed' if not failing else str(len(failing)) + ' problem(s)'))
-    return '\n'.join(lines + failing)
+    failed = sum(p.startswith('FAIL') for p in problems)
+    warned = len(problems) - failed
+    if not problems:
+        summary = 'all checks passed'
+    else:
+        summary = str(failed) + ' required problem(s), ' + str(warned) + ' warning(s)'
+    lines.append('summary: ' + summary)
+    return '\n'.join(lines + problems)
 
 
-def doctor(project, store, probe=False, scope='project'):
+def doctor(project, store, probe=False, scope='project', deps_probe=True):
     issues = []
-    installed = False
-    missing = list(DOCTOR_EVENTS)
-    path = None
-    try:
-        path = hooks_file(project, scope)
-        doc = json.loads(path.read_bytes())
-        missing = missing_events(doc)
-        installed = not missing
-        if not installed:
-            issues.append('ALS hook handler missing for ' + ', '.join(missing)
-                          + ' -> reinstall ALS hooks, then review /hooks in Codex')
-    except (OSError, ValueError, HarnessError):
-        issues.append('Hooks file not installed/readable -> install ALS hooks, or use the CLI without hooks')
+    checked, found_in, configured = [], {}, set()
+    for path in hooks_files(project):
+        checked.append(str(path))
+        try:
+            doc = json.loads(path.read_bytes())
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as ex:
+            issues.append('Hooks file unreadable: ' + str(path) + ' (' + type(ex).__name__ + ')')
+            continue
+        events = configured_events(doc)
+        if events:
+            found_in[str(path)] = [e for e in DOCTOR_EVENTS if e in events]
+            configured |= events
+    missing = [e for e in DOCTOR_EVENTS if e not in configured]
+    installed = not missing
+    if not found_in:
+        issues.append('ALS hooks not installed (checked ' + ', '.join(checked)
+                      + ') -> install ALS hooks, or use the CLI without hooks')
+    elif missing:
+        issues.append('ALS hook handler missing for ' + ', '.join(missing)
+                      + ' -> reinstall ALS hooks, then review /hooks in Codex')
     observed = {}
     rows = store.db.execute('SELECT id,doc FROM sessions ORDER BY rowid DESC LIMIT 8') if store else []
     for row in rows:
         observed[row['id']] = json.loads(row['doc']).get('seen', [])
     result = {'hooks_configured': installed, 'hook_events_missing': missing, 'scope': scope,
-              'hooks_file': str(path) if path else None, 'state_path': str(state_path(project, scope)),
+              'hooks_file': next(iter(found_in), None), 'hooks_found_in': found_in, 'hooks_checked': checked,
+              'state_path': str(state_path(project, scope)),
               'observed_events_by_session': observed, 'issues': issues,
               'paid_model_calls': False, 'hook_trust_verified': False, 'blocking_behavior_verified': False,
               'note': 'Review/trust with /hooks. Observed callbacks and fixtures are not an end-to-end proof'
                       ' of installed Codex enforcement.'}
-    result['deps'] = dependency_report(project)
+    result['deps'] = dependency_report(project, deps_probe)
     if probe:
         result['probes'] = {}
         for key, cmd in {'version': ['codex', '--version'], 'features': ['codex', 'features', 'list']}.items():
@@ -205,6 +256,7 @@ def doctor(project, store, probe=False, scope='project'):
                 result['probes'][key] = {'exit_code': p.returncode, 'output': redact(p.stdout[:2000])}
             except (OSError, subprocess.TimeoutExpired):
                 result['issues'].append(key + ' probe failed')
+    result['exit_code'] = 1 if doctor_failed(result) else 0
     return result
 
 
@@ -223,8 +275,12 @@ def parser():
                             ' pass --session.')
     start.add_argument('--mode', choices=['observe', 'guarded'], default='observe')
     start.add_argument('--ack-hook-limits', action='store_true')
-    d = sub.add_parser('doctor')
-    d.add_argument('--probe', action='store_true')
+    d = sub.add_parser('doctor', description='Check hooks, state and dependencies. Exit 0 when every REQUIRED'
+                                             ' dependency is present (warnings allowed), 1 when a required one'
+                                             ' fails, 2 on a usage or state error.')
+    d.add_argument('--probe', action='store_true', help='Also run `codex --version` / `codex features list`.')
+    d.add_argument('--no-probe', action='store_true',
+                   help='Do not run external probes in the dependency check (deps.check(probe=False)).')
     d.add_argument('--format', choices=['json', 'text'], default='json')
     sub.add_parser('hook')
     status = sub.add_parser('status', help='Unfinished runs (all with --all), or one run with --run.')
@@ -367,7 +423,8 @@ def dispatch(args, store):
             out['warnings'] = [problem]
             print('ALS WARNING: ' + problem, file=sys.stderr)
     elif args.cmd == 'doctor':
-        out = doctor(store.project, store, args.probe, args.scope)
+        out = doctor(store.project, store, args.probe, args.scope, not args.no_probe)
+        code = out['exit_code']
     elif args.cmd == 'status':
         if args.run:
             out = report.report(e, args.run)
@@ -489,12 +546,14 @@ def main(argv=None):
             print(json.dumps(offline(args, project), ensure_ascii=False, indent=2))
             return 0
         if args.cmd in ('status', 'doctor') and not state_path(project, args.scope).exists():
+            code = 0
             if args.cmd == 'doctor':
-                out = doctor(project, None, args.probe, args.scope)
+                out = doctor(project, None, args.probe, args.scope, not args.no_probe)
+                code = out['exit_code']
             else:
                 out = {'runs': [], 'note': 'No managed runs registered', 'next': 'harness.py start --plan <plan.json>'}
             emit(args, out)
-            return 0
+            return code
         store = open_store(project, args.scope, hook=args.cmd == 'hook')
         if args.cmd == 'hook':
             out = hooks.handle(store, payload)
