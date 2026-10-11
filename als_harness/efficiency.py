@@ -6,7 +6,7 @@ Complexity/risk are caller declarations, not an AI classifier or security bounda
 from __future__ import annotations
 import copy
 import json
-from .common import HarnessError, ROLES, digest, relative
+from .common import HarnessError, ROLES, digest, encoded, relative
 
 POLICY_VERSION = 1
 KINDS = {'exploration', 'research', 'test_execution', 'test_design', 'implementation', 'review'}
@@ -17,6 +17,8 @@ PROFILES = {
     'balanced': {'max_concurrent': 3, 'max_writers': 2, 'max_total_spawns': 12},
     'throughput': {'max_concurrent': 6, 'max_writers': 2, 'max_total_spawns': 24},
 }
+LIMIT_KEYS = ('max_concurrent', 'max_writers', 'max_total_spawns')
+READ_ONLY_KINDS = {'exploration', 'research', 'review'}
 DEFAULT_ROLE = {
     'exploration': 'als_explorer', 'research': 'als_researcher',
     'test_execution': 'als_tester', 'test_design': 'als_test_designer',
@@ -39,16 +41,26 @@ def texts(values, name, count, width):
 
 
 def route(task):
-    """Select a fixed TOML role; never silently override an explicit role."""
+    """Select a fixed TOML role; never silently override an explicit role.
+
+    Read-only kinds (exploration, research, review) always stay on read-only
+    roles; complexity/risk never hands them a write-capable sandbox.
+    """
     kind, complexity, risk = (task.get(k) for k in ('kind', 'complexity', 'risk'))
     if kind not in KINDS or complexity not in COMPLEXITIES or risk not in RISKS:
         raise HarnessError('Prepared tasks require valid kind, complexity and risk')
     reason = short(task.get('delegation_reason', ''), 'delegation_reason', 500)
     executor = 'head' if complexity == 'trivial' and risk == 'low' and not reason.strip() else 'worker'
+    hard = risk == 'high' or complexity == 'complex'
     role = DEFAULT_ROLE[kind]
-    if kind == 'review' and (risk == 'high' or complexity == 'complex'):
-        role = 'als_reviewer_deep'
-    elif kind != 'review' and (risk == 'high' or (complexity == 'complex' and kind not in {'test_design'})):
+    note = None
+    if kind == 'review':
+        role = 'als_reviewer_deep' if hard else role
+    elif kind in READ_ONLY_KINDS:
+        if hard:
+            note = ('Declared complex/high-risk read-only work stays on a read-only role. Consider an '
+                    'explicit als_reviewer_deep override (role_override_reason) or HEAD review of findings.')
+    elif risk == 'high' or (complexity == 'complex' and kind != 'test_design'):
         role = 'als_hard_worker'
     # Test execution with hard failure analysis should be classified test_design.
     if kind == 'test_design' and risk != 'high':
@@ -58,12 +70,19 @@ def route(task):
     if explicit and explicit != role:
         if explicit not in ROLES or not override.strip():
             raise HarnessError(f'Task {task.get("id")}: recommended {role}; explicit role needs role_override_reason')
-        if risk == 'high' and explicit not in {'als_hard_worker', 'als_reviewer_deep'}:
+        if kind in READ_ONLY_KINDS and ROLES[explicit][2]:
+            raise HarnessError('Read-only work cannot be overridden to a write-capable role')
+        if kind == 'review' and risk == 'high' and explicit != 'als_reviewer_deep':
+            raise HarnessError('High-risk review stays on als_reviewer_deep')
+        if kind not in READ_ONLY_KINDS and risk == 'high' and explicit not in {'als_hard_worker', 'als_reviewer_deep'}:
             raise HarnessError('High-risk work cannot be silently downgraded to a light role')
         role = explicit
-    return {'executor': executor, 'role': role, 'basis': 'declared_kind_complexity_risk',
-            'requested_model': 'gpt-6-astra' if executor == 'head' else ROLES[role][0],
-            'requested_effort': 'medium' if executor == 'head' else ROLES[role][1]}
+    out = {'executor': executor, 'role': role, 'basis': 'declared_kind_complexity_risk',
+           'requested_model': 'gpt-6-astra' if executor == 'head' else ROLES[role][0],
+           'requested_effort': 'medium' if executor == 'head' else ROLES[role][1]}
+    if note:
+        out['recommend_escalation'] = note
+    return out
 
 
 def normalize_task(task):
@@ -77,17 +96,34 @@ def normalize_task(task):
     if not t['acceptance']:
         raise HarnessError('Each prepared task needs explicit acceptance conditions')
     short(t.get('full_context_reason', ''), 'full_context_reason', 500)
+    t.pop('recommend_escalation', None)  # Always re-derived; never trusted from input.
     t.update(route(t))
     return t
 
 
 def signature(task):
-    # Exact semantic-field duplicate detection only; do not invent fuzzy matches.
+    """Exact semantic-field duplicate detection only; do not invent fuzzy matches.
+
+    Paths are normalized so './a' and 'a/' are the same scope; any differing
+    check, constraint, risk, complexity or role makes tasks distinct.
+    """
     return digest({'kind': task['kind'], 'objective': ' '.join(task['objective'].split()).casefold(),
-                   'context_files': sorted(task.get('context_files', [])),
-                   'write_paths': sorted(task.get('write_paths', [])),
-                   'resources': sorted(task.get('resources', [])),
-                   'acceptance': task.get('acceptance', [])})
+                   'context_files': sorted({relative(p) for p in task.get('context_files', [])}),
+                   'write_paths': sorted({relative(p) for p in task.get('write_paths', [])}),
+                   'resources': sorted(task.get('resources', []), key=encoded),
+                   'checks': sorted(task.get('checks', []), key=encoded),
+                   'constraints': task.get('constraints', []),
+                   'acceptance': task.get('acceptance', []),
+                   'risk': task.get('risk'), 'complexity': task.get('complexity'),
+                   'role': task.get('role')})
+
+
+def profile_limits(profile, tasks):
+    """Effective caps: the profile values, with one writer for high-risk writes."""
+    limits = {k: PROFILES[profile][k] for k in LIMIT_KEYS}
+    if any(t.get('risk') == 'high' and t.get('write_paths') for t in tasks):
+        limits['max_writers'] = 1
+    return limits
 
 
 def prepare(plan, profile='balanced', history=None):
@@ -102,19 +138,24 @@ def prepare(plan, profile='balanced', history=None):
     e = dict(PROFILES[profile], version=POLICY_VERSION, profile=profile,
              max_message_chars=MAX_MESSAGE_CHARS, result_chars=MAX_RESULT_CHARS,
              finalization_reserve_percent=20)
-    # Explicit caller restrictions can be lower, not silently higher than profile.
+    # Explicit caller restrictions can only lower the profile caps, never raise them.
+    caps = profile_limits(profile, p['tasks'])
+    capped = []
     for k, maximum in (('max_concurrent', 6), ('max_writers', 2), ('max_total_spawns', 50)):
         if k in prior:
             n = prior[k]
             if type(n) is not int or not 1 <= n <= maximum:
                 raise HarnessError('Invalid efficiency.' + k)
-            e[k] = n
+            if n > caps[k]:
+                capped.append(k)
+            e[k] = min(n, caps[k])
+    if capped:
+        e['caller_limits_capped'] = capped
     rationale = short(prior.get('parallel_reason', ''), 'parallel_reason', 500)
     if e['max_concurrent'] > 3 and len(rationale.strip()) < 20:
         raise HarnessError('More than 3 concurrent workers requires a specific parallel_reason')
     e['parallel_reason'] = rationale
-    if any(t['risk'] == 'high' and t.get('write_paths') for t in p['tasks']):
-        e['max_writers'] = 1
+    e['max_writers'] = min(e['max_writers'], caps['max_writers'])
     p['purpose'] = p.get('purpose', 'production')
     if p['purpose'] not in {'production', 'diagnostic'}:
         raise HarnessError('purpose must be production or diagnostic')
@@ -160,6 +201,10 @@ def validate(plan):
         raise HarnessError('Prepared policy reserves 20% of an explicit soft budget for finalization')
     if e['max_concurrent'] > 3 and len(short(e.get('parallel_reason', ''), 'parallel_reason', 500).strip()) < 20:
         raise HarnessError('High concurrency requires parallel_reason')
+    # Edited prepared plans cannot lift the profile caps or the high-risk single writer.
+    for key, cap in profile_limits(e['profile'], plan.get('tasks', [])).items():
+        if e[key] > cap:
+            raise HarnessError(f'efficiency.{key} exceeds the {e["profile"]} profile cap of {cap}; re-run prepare')
     signatures = set()
     for t in plan.get('tasks', []):
         normalized = normalize_task(t)
