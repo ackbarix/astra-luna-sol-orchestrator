@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -98,10 +99,24 @@ def load_toml(path):
         return tomllib.load(stream)
 
 
-def inspect_config(project):
+def config_locations(project, codex_home=None):
+    """(config.toml, agents dir, source). Project ALS files win; a project
+    without ALS role files uses the global install: $CODEX_HOME/als.config.toml
+    (the `als` profile) and $CODEX_HOME/agents/."""
+    agents = project / ".codex/agents"
+    if any(agents.glob("als_*.toml")):
+        return project / ".codex/config.toml", agents, "project"
+    home = Path(codex_home or os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+    return home / "als.config.toml", home / "agents", "global"
+
+
+def inspect_config(project, codex_home=None):
     problems, values = [], {}
+    config_path, agents_dir, source = config_locations(project, codex_home)
+    values["config_source"] = source
+    values["config_path"] = str(config_path)
     try:
-        config = load_toml(project / ".codex/config.toml")
+        config = load_toml(config_path)
         values["head"] = [config.get("model"), config.get("model_reasoning_effort")]
         if values["head"] != ["gpt-6-astra", "medium"]:
             problems.append("HEAD config does not match Astra Medium")
@@ -112,13 +127,13 @@ def inspect_config(project):
             if agents.get(key) != expected:
                 problems.append("Unexpected agents." + key)
         for role, expected in EXPECTED.items():
-            data = load_toml(project / ".codex/agents" / (role + ".toml"))
+            data = load_toml(agents_dir / (role + ".toml"))
             actual = (data.get("model"), data.get("model_reasoning_effort"))
             values[role] = actual
             if data.get("name") != role or actual != expected:
                 problems.append("Role mismatch: " + role)
     except (OSError, ValueError) as ex:
-        problems.append("Cannot inspect project config: " + str(ex))
+        problems.append("Cannot inspect " + source + " config: " + str(ex))
     return values, problems
 
 
@@ -209,7 +224,11 @@ def main(argv=None):
     parser.add_argument("--smoke-prompt", action="store_true", help="Print instructions; does not execute them")
     args = parser.parse_args(argv)
     if args.smoke_prompt:
-        path = here / "smoke-test.txt" if here.name == ".astra-luna-sol" else here.parent / "docs/smoke-test.txt"
+        # Installed runtimes (project .astra-luna-sol/ or global $ALS_HOME) ship
+        # smoke-test.txt beside this script; a source checkout keeps it in docs/.
+        path = here / "smoke-test.txt"
+        if not path.is_file():
+            path = here.parent / "docs/smoke-test.txt"
         print(path.read_text(encoding="utf-8"))
         return 0
     values, problems = inspect_config(args.project.resolve())

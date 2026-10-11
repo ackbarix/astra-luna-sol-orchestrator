@@ -22,6 +22,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
 UTC = timezone.utc
 MAX_LINE = 8 * 1024 * 1024
+# Index warnings for rollout files that could not be attributed to any session.
+UNATTRIBUTED_PREFIXES = ("missing_session_meta:", "missing_thread_id:", "unreadable_file:", "unreadable_line:",
+                         "oversized_line:", "non_object_record:", "symlink_skipped:")
 
 
 def empty_usage():
@@ -451,7 +454,7 @@ def main(argv=None):
         parser.error("--limit must be positive")
     directory = Path(args.sessions_dir).expanduser()
     if not directory.is_dir():
-        print("Sessions directory not found", file=sys.stderr)
+        print(f"Sessions directory not found: {directory}", file=sys.stderr)
         return 2
     index_warnings, directories = [], [directory]
     if args.include_archived:
@@ -534,6 +537,11 @@ def main(argv=None):
             threads.append(thread)
             used.add(lineage)
     warnings, other = split_warnings(used)
+    if not (args.root or args.latest or args.latest_with_workers or args.cwd):
+        # Not narrowed to known roots (e.g. --day or --date without --cwd): a
+        # rollout that could not be tied to any session may hold usage in this
+        # selection, so it makes the report incomplete.
+        warnings = warnings + [w for w in other if w.startswith(UNATTRIBUTED_PREFIXES)]
     root = next(iter(chosen)) if len(chosen) == 1 and not args.day else None
     report = build_report(root, threads, args.include_guardian, args.day, tz, args.include_events, warnings, other)
     if args.date:
