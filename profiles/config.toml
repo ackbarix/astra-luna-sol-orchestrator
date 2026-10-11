@@ -1,4 +1,4 @@
-# ALS 0.2.0 defaults; existing configs use a reversible, validated overlay.
+# ALS 0.3.0 defaults; existing configs use a reversible, validated overlay.
 model = "gpt-6-astra"
 model_reasoning_effort = "medium"
 approval_policy = "on-request"

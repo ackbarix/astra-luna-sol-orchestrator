@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  install-and-report:
+  install-harness-and-report:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python3 -m unittest discover -s tests -v
-      - run: python3 -m py_compile install.py config_overlay.py scripts/token_usage.py scripts/check-runtime.py
+      - run: python3 -m py_compile install.py config_overlay.py scripts/token_usage.py scripts/check-runtime.py scripts/harness.py als_harness/*.py
       - name: Check each shell script (not just the first positional argument)
         run: |
           for script in install.sh setup.sh scripts/*.sh; do

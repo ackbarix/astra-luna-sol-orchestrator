@@ -1,10 +1,57 @@
-# Astra–Luna–Sol Orchestrator · 0.2.0
+# Astra–Luna–Sol Orchestrator · 0.3.0
 
 프로젝트에서 **`codex`만 실행**하는 개인용 GPT 오케스트레이션입니다.
 참고: [donvito/codex-astra-luna-orchestrator](https://github.com/donvito/codex-astra-luna-orchestrator).
 OpenAI/OpenCodex의 공식 배포물이 아닙니다. 토큰 절감률이나 최고 성능은 보장하지 않습니다.
 
-## 이번 변경
+## 0.3.0: 경량 하네스 추가
+
+모델 구성과 `codex` 실행은 그대로 유지합니다. **SQLite 기반 작업 상태, 파일/공유 자원 예약,
+증거 기반 완료 검사, 중단 후 대조·재개, 제한된 재시도 준비, 증분 토큰 예산 관측**이 추가됐습니다.
+감독용 AI나 자체 모델 라우터는 추가하지 않았습니다.
+
+```bash
+cd ~/astra-luna-sol-orchestrator
+git pull --ff-only
+sh install.sh /data/reactive-shortterm --dry-run
+sh install.sh /data/reactive-shortterm
+sh install.sh /data/reactive-shortterm --check
+cd /data/reactive-shortterm
+codex
+```
+
+**새 세션의 `/hooks`에서 ALS 훅을 검토·신뢰하세요.** 설치기가 훅 신뢰를 우회하지 않습니다.
+기존 hooks.json의 사용자 항목은 보존합니다. 인라인 `[hooks]`와 충돌하면 `--skip-hooks`로
+CLI만 설치하거나 기존 훅 구성을 먼저 정리합니다. 상태·증거 데이터는 Git에 자동 게시하지 않습니다.
+
+```text
+$astra-luna-sol
+이번 기능을 하네스로 관리해. 계획과 완료 조건을 등록하고,
+독립 작업만 위임한 뒤 승인된 테스트의 실행 결과를 남겨줘.
+```
+
+Observe(기록·경고)가 기본입니다. Guarded는 실제 훅 콜백 확인 및 사용자 동의 후 선택합니다.
+Guarded도 OS 샌드박스나 정확한 청구 상한은 아닙니다. `complete`의 명시적 요청에만 완료
+검사를 적용하며, 누락 보완용 Stop 계속 요청은 run당 **최대 한 번**입니다. 무한 반복하지 않습니다.
+
+```bash
+python3 .astra-luna-sol/harness.py doctor --probe
+python3 .astra-luna-sol/harness.py status
+# RUN_ID는 실제 start 결과/상태에서 확인
+python3 .astra-luna-sol/harness.py sync-usage --run RUN_ID
+python3 .astra-luna-sol/harness.py report --run RUN_ID --format md
+```
+
+[하네스 설치·계획 JSON·워크플로·한계](docs/harness.md)를 먼저 읽으세요.
+훅은 명령/모델을 자동 호출하지 않습니다. 검증 명령은 사용자가/HEAD가 선언한 argv를
+명시적 `verify --execute`로 실행합니다. 테스트 실행에는 별도 OS 격리가 생기지 않습니다.
+Git worktree 루트에서 사용하며, 서브모듈·대형 파일 등 지원 범위를 넘으면 인증 대신 오류를 반환합니다.
+
+**검증 범위:** 임시 Git 프로젝트, 합성 Codex 훅/로그, 로컬 검사 명령, 설치/복원 회귀 테스트.
+사용자 머신의 유료 Codex 워커·제공자 라우팅·비용 절감률은 아직 실측하지 않았습니다.
+Codex 버전/관리 정책이 훅을 지원·허용해야 하며 `doctor`는 이를 완전히 인증하지 않습니다.
+
+## 0.2.0에서 이어지는 설정·리포터
 
 기존 버전의 `[[skills.config]]` 병합 오류를 수정했습니다. 관리 대상 외의 TOML
 설정값이 하나라도 바뀌면 설치를 중단합니다. 기존 설치 기록을 읽어 업그레이드하고,

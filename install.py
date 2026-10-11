@@ -19,11 +19,13 @@ import tempfile
 if sys.version_info < (3, 11):
     raise SystemExit("Python 3.11+ is required (python3 --version)")
 import config_overlay
+from als_harness import integration as hook_config
 
 ROOT = Path(__file__).resolve().parent
 START, END = "<!-- ALS:BEGIN -->", "<!-- ALS:END -->"
 CONFIG, AGENTS, MANIFEST = ".codex/config.toml", "AGENTS.md", ".astra-luna-sol/manifest.json"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
+HOOKS = ".codex/hooks.json"
 
 
 def digest(data: bytes) -> str:
@@ -110,6 +112,11 @@ def sources() -> dict[str, Path]:
         ".astra-luna-sol/licenses/Apache-2.0.txt": "licenses/Apache-2.0.txt",
     }.items():
         out[target] = ROOT / source
+    out[".astra-luna-sol/harness.py"] = ROOT / "scripts/harness.py"
+    out[".astra-luna-sol/.gitignore"] = ROOT / "profiles/runtime.gitignore"
+    out[".astra-luna-sol/harness-guide.md"] = ROOT / "docs/harness.md"
+    for module in sorted((ROOT / "als_harness").glob("*.py")):
+        out[".astra-luna-sol/als_harness/" + module.name] = module
     return out
 
 
@@ -130,6 +137,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--target", required=True)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--skip-hooks", action="store_true", help="Install CLI only; remove only prior ALS hook groups")
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--check", action="store_true")
     group.add_argument("--uninstall", action="store_true")
@@ -187,9 +195,20 @@ def main(argv=None) -> int:
         config_data = merged.encode("utf-8")
     original_agents = snapshot(AGENTS)
     old_block = policy_block(text(original_agents), state)
+    before_hooks = snapshot(HOOKS)
+    hooks_state = state.get("hooks")
+    restored_hooks = hook_config.remove(before_hooks, hooks_state) if hooks_state else before_hooks
+    next_hooks = None
+    if args.uninstall or args.skip_hooks:
+        hooks_data = restored_hooks
+    else:
+        if config_overlay.parse(text(before_config)).get("hooks"):
+            raise ValueError("Inline Codex hooks already exist; use --skip-hooks or reconcile sources explicitly")
+        hooks_data, next_hooks = hook_config.merge(before_hooks, hooks_state, target)
     if args.check:
         outdated = state.get("version") != VERSION or config_state is None or config_data != before_config
         outdated |= any(state["files"].get(k) != digest(v) for k, v in desired.items())
+        outdated |= not args.skip_hooks and (not hooks_state or hooks_data != before_hooks)
         if outdated:
             print("Installed files are intact, but update/reinstall is required")
             return 2
@@ -198,6 +217,12 @@ def main(argv=None) -> int:
     plan = {}
     if args.uninstall:
         plan.update({rel: None for rel in state["files"]})
+        # Runtime state/evidence are user data, not release files. Keep their ignore
+        # policy on uninstall if any runtime data remain; never delete the data.
+        if any((target / ".astra-luna-sol" / x).exists() for x in ("state", "evidence")):
+            plan.pop(".astra-luna-sol/.gitignore", None)
+        if hooks_state:
+            plan[HOOKS] = restored_hooks
         if config_state:
             plan[CONFIG] = restored.encode() if restored is not None else None
         if old_block:
@@ -216,6 +241,8 @@ def main(argv=None) -> int:
         plan[MANIFEST] = None
     else:
         plan.update(desired)
+        if next_hooks or hooks_state:
+            plan[HOOKS] = hooks_data
         plan[CONFIG] = config_data
         block = START + "\n" + (ROOT / "profiles/AGENTS.snippet.md").read_text(encoding="utf-8").strip() + "\n" + END
         original = text(original_agents)
@@ -227,7 +254,7 @@ def main(argv=None) -> int:
             updated = original + join + block + "\n"
         plan[AGENTS] = updated.encode()
         manifest = {"version": VERSION, "files": {rel: digest(data) for rel, data in desired.items()},
-                    "config": next_config, "agents": digest(block.encode()), "agents_join": join,
+                    "config": next_config, "hooks": next_hooks, "agents": digest(block.encode()), "agents_join": join,
                     "created": state.get("created", False) if original_agents is not None else True}
         plan[MANIFEST] = (json.dumps(manifest, indent=2) + "\n").encode()
     for rel, data in plan.items():
@@ -238,7 +265,7 @@ def main(argv=None) -> int:
         print("DRY RUN: nothing written, no Codex/OpenCodex calls")
         return 0
     commit(target, plan, snapshots)
-    print("UNINSTALL OK" if args.uninstall else "INSTALL OK 0.2.0: run codex in the trusted project")
+    print("UNINSTALL OK" if args.uninstall else "INSTALL OK 0.3.0: run codex; review /hooks before managing a run (observe default)")
     return 0
 
 

@@ -1,4 +1,4 @@
-## Astra–Luna–Sol orchestration (0.2)
+## Astra–Luna–Sol orchestration (0.3)
 
 For substantive work that benefits from delegation, use `$astra-luna-sol`.
 Astra Medium owns requirements, architecture and integration. Use exact named
@@ -15,3 +15,5 @@ spawns children. Preserve user edits and permission boundaries.
 
 Report actual spawns and checks briefly; never invent model routing, usage or
 passing tests. User instructions and the active tool schema take precedence.
+
+For substantive user-requested managed work, ALS 0.3 provides `.astra-luna-sol/harness.py`. Read `harness-guide.md` only when needed. Observe is default; hook trust and guarded mode are explicit. Never initialize a run or spawn workers for trivial work merely to satisfy the harness.

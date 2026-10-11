@@ -2,7 +2,7 @@
 name: astra-luna-sol
 description: Coordinate substantive coding work when bounded delegation improves correctness or elapsed time. Skip trivial localized edits and simple questions.
 ---
-# Astra–Luna–Sol 0.2: cost-aware execution, evidence-based verification
+# Astra–Luna–Sol 0.3: cost-aware execution, evidence-based verification
 
 This is a decision policy, not a scheduler or a guaranteed optimal benchmark.
 Actual runtime settings and user authorization remain authoritative.
@@ -77,3 +77,35 @@ completion time and rework, not raw token count alone. Cached input is part of
 input and reasoning is part of output; don't add either twice. A session log is
 not an invoice. Legacy/unclassified counters must not be assigned to the final
 model. Tune Medium vs Max using the same tasks; no savings percentage is promised.
+
+## Opt-in managed runs (ALS 0.3 harness)
+
+For substantial tasks when the user asks for harness management, use the installed
+`.astra-luna-sol/harness.py` CLI. Read `.astra-luna-sol/harness-guide.md` when needed.
+Hooks and their trust must be available; never claim they are active from prose.
+
+1. Write a bounded JSON plan with goal, tasks/roles, dependencies, exclusive write
+   paths/shared resources, declared argv checks, and acceptance criteria. Use only
+   tests/actions authorized for this task; do not create costs merely to prove setup.
+2. Start in observe mode and explicitly bind the actual session ID supplied by the
+   SessionStart hook (`start --plan FILE --session ID`). Never guess a session ID.
+   Guarded mode is user opt-in after real callback checks; don't silently enable it.
+3. Use the real spawn tool's `agent_type` role and begin each delegated message with
+   a line `ALS_TASK=<task-id>`. This links actual tool/agent IDs to the plan without
+   inventing a new tool argument. A rejected/uncorrelated spawn isn't successful work.
+4. After the worker really stops, record `finish --run ID --task TASK --note ...`.
+   If termination isn't observed, inspect the real worker before using
+   `--workers-stopped`. Don't release a live writer merely to pass a check.
+5. Run authorized declared checks using `verify --run ID --execute`, then `accept`
+   tasks whose result/checks are adequate. Criteria are separate explicit `assess`
+   records (actor HEAD); do not present them as authenticated human approval.
+6. `complete --run ID` certifies only declared/current evidence. If checks fail,
+   the dependency isn't done, or evidence is stale, fix only the required authorized
+   scope, or pause/report the blocker. Don't loop blindly or rewrite tests to win.
+7. Resume reconciles code and uncertain workers; it never resets/stashes user work.
+   Retry prepares a pending task but does NOT spawn another model. Maximum 3 attempts.
+8. Use `sync-usage` and `report` for records. Reporting/observation never needs an LLM.
+
+For trivial work, use ordinary ALS without starting a harness run. This does not
+force all role types or a particular worker count. A persistent state/claim is not
+an OS permission boundary; cancellation needs the actual Codex turn stopped too.
