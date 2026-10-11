@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-from .common import HarnessError, digest, ident, now
+import shlex
+from .common import ACTIVE, HarnessError, digest, ident, now
 from .engine import Engine
 from . import usage
 
@@ -100,6 +101,25 @@ def update_worker(store, wid, sid, **fields):
         store.worker(wid, sid, w)
 
 
+def harness_script():
+    home = Path(__file__).resolve().parents[1]
+    installed = home / 'harness.py'
+    return installed if installed.is_file() else home / 'scripts/harness.py'
+
+
+def resume_command(store, run, sid):
+    """Exact one-line resume for a run paused by a Codex SessionEnd. Never executed here."""
+    argv = ['python3', str(harness_script()), '--project', str(store.project), 'resume', '--run', run['id'],
+            '--session', sid]
+    if any(t['status'] in ACTIVE or t.get('claims_held') for t in store.tasks(run['id'])):
+        argv.append('--workers-stopped')
+    return ' '.join(shlex.quote(x) for x in argv)
+
+
+def session_end_runs(store):
+    return [r for r in store.runs() if r['status'] == 'paused' and r.get('paused_by_session_end')]
+
+
 def handle(store, payload):
     if not isinstance(payload, dict):
         raise HarnessError('Hook payload must be an object')
@@ -133,9 +153,16 @@ def handle(store, payload):
     if not run:
         if event == 'SessionStart':
             pending = [r['id'] for r in store.runs() if r['status'] not in {'completed', 'cancelled'}][:4]
-            return context(event, 'ALS harness available; session ' + sid + '. Do not create a run for trivial work. '
-                           + 'Register a plan with harness.py start --session ' + sid
-                           + ' for managed work. Pending runs: ' + (','.join(pending) or 'none'))
+            message = ('ALS harness available; session ' + sid + '. Do not create a run for trivial work. '
+                       + 'Register a plan with harness.py start --session ' + sid
+                       + ' for managed work. Pending runs: ' + (','.join(pending) or 'none'))
+            ended = session_end_runs(store)[:2]
+            if ended:
+                # SessionEnd paused these for safety; reattaching stays an explicit user step.
+                message += ('\nPaused by a previous Codex SessionEnd. Only if the user wants to continue, run'
+                            ' (after confirming old workers stopped; add --accept-drift only after reviewing'
+                            ' reported changes):\n' + '\n'.join(resume_command(store, r, sid) for r in ended))
+            return context(event, message)
         return {}
     rid = run['id']
     mode = run['mode']
@@ -144,11 +171,22 @@ def handle(store, payload):
     # running: mark them uncertain and retain claims until explicit reconciliation.
     if event in {'SessionEnd', 'Interrupt'}:
         engine.pause(rid, 'Codex ' + event)
+        if event == 'SessionEnd':
+            with store.tx():
+                r = store.run(rid)
+                if r['status'] == 'paused':
+                    r['paused_by_session_end'] = sid
+                    store.save_run(r)
         return {}
     if event == 'SessionStart':
-        return context(event, 'ALS run ' + rid + ' is ' + run['status']
-                       + '. Inspect harness.py status before restarting any worker.'
-                       + ' A resumed chat is not an automatic task replay.')
+        message = ('ALS run ' + rid + ' is ' + run['status'] + '. Inspect harness.py status before restarting any worker.'
+                   + ' A resumed chat is not an automatic task replay.')
+        if run['status'] == 'paused' and run.get('paused_by_session_end'):
+            # Same session id after resume/compact/clear: still no automatic reattach.
+            message += ('\nPaused by Codex SessionEnd; not reattached automatically. Only if the user wants to'
+                        ' continue, run (add --accept-drift only after reviewing reported changes):\n'
+                        + resume_command(store, run, sid))
+        return context(event, message)
     if event == 'SubagentStart':
         wid = ident(payload.get('agent_id'))
         with store.tx():

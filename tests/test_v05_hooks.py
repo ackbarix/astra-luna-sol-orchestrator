@@ -1,5 +1,6 @@
 """ALS 0.5.0 hook audit regressions: synthetic payloads only, no Codex or model calls."""
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from unittest.mock import patch
 from als_harness.state import Store
 from als_harness.engine import Engine
 from als_harness.common import HarnessError
-from als_harness import hooks
+from als_harness import cli, hooks
 
 
 class HookAuditTests(unittest.TestCase):
@@ -144,6 +145,59 @@ class HookAuditTests(unittest.TestCase):
         self.e.reserve(r, 'one', 'call')
         self.assertEqual(self.event('PostToolUse', tool_name='spawn_agent', tool_response={'agent_id': 'kid'}), {})
         self.assertEqual(self.s.task(r, 'one')['status'], 'running')
+
+
+
+class SessionResumeTests(unittest.TestCase):
+    """Item 8: SessionEnd keeps pausing; the next SessionStart prints the exact resume command."""
+    setUp = HookAuditTests.setUp
+    tearDown = HookAuditTests.tearDown
+    plan = HookAuditTests.plan
+    task = HookAuditTests.task
+    event = HookAuditTests.event
+
+    def command(self, out):
+        text = out['hookSpecificOutput']['additionalContext']
+        line = next(x for x in text.split('\n') if ' resume --run ' in x)
+        return shlex.split(line.strip())
+
+    def parsed(self, argv):
+        start = next(i for i, x in enumerate(argv) if x.endswith('harness.py'))
+        return cli.parser().parse_args(argv[start + 1:])
+
+    def test_new_session_gets_resume_command_with_workers_stopped(self):
+        r = self.e.start(self.plan([self.task()]), 'old')
+        self.e.reserve(r, 'one', 'c')
+        self.event('SessionEnd', sid='old')
+        self.assertEqual(self.s.run(r)['status'], 'paused')
+        args = self.parsed(self.command(self.event('SessionStart', sid='new', source='startup')))
+        self.assertEqual((args.cmd, args.run, args.session, args.workers_stopped), ('resume', r, 'new', True))
+        self.assertEqual(args.project.resolve(), self.project.resolve())
+        self.assertEqual(self.s.run(r)['status'], 'paused')
+        self.e.resume(args.run, args.accept_drift, args.workers_stopped, args.session)
+        self.assertEqual(self.s.for_session('new')['id'], r)
+
+    def test_resume_command_without_active_tasks(self):
+        r = self.e.start(self.plan([self.task()]), 'old')
+        self.event('SessionEnd', sid='old')
+        args = self.parsed(self.command(self.event('SessionStart', sid='new')))
+        self.assertEqual((args.run, args.session, args.workers_stopped), (r, 'new', False))
+
+    def test_same_session_restart_is_not_auto_reattached(self):
+        r = self.e.start(self.plan([self.task()]), 'sid')
+        self.event('SessionEnd')
+        for source in ('resume', 'compact', 'clear'):
+            out = self.event('SessionStart', source=source)
+            args = self.parsed(self.command(out))
+            self.assertEqual((args.run, args.session), (r, 'sid'))
+            self.assertEqual(self.s.run(r)['status'], 'paused')
+
+    def test_user_pause_does_not_advertise_session_resume(self):
+        r = self.e.start(self.plan([self.task()]), 'old')
+        self.e.pause(r, 'human review')
+        text = self.event('SessionStart', sid='new')['hookSpecificOutput']['additionalContext']
+        self.assertNotIn('resume --run', text)
+        self.assertIn(r, text)
 
 
 if __name__ == '__main__':
