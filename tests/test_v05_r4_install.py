@@ -357,13 +357,17 @@ class OldGitTests(R4Sandbox, unittest.TestCase):
 class DocsTests(unittest.TestCase):
     def test_hook_command_forms_documented(self):
         guide = (ROOT / 'docs/harness.md').read_text()
+        # README is the short quickstart; install details live in docs/install.md.
+        install = (ROOT / 'docs/install.md').read_text()
         readme = (ROOT / 'README.md').read_text()
         self.assertIn(integration.command('project'), guide)
-        for text in (guide, readme):
+        for text in (guide, install):
             self.assertIn('python3 "${HOME:-/home/me}/.local/share/als/harness.py" hook', text)
+        for text in (guide, install, readme):
             self.assertNotIn('python3 "$HOME/.local/share/als/harness.py" hook', text)
         for name in ('ALS_DEPS_TIMEOUT', 'ALS_PYTHON', 'ALS_HOME', 'outdated_project_install'):
-            self.assertIn(name, readme)
+            self.assertIn(name, install)
+        self.assertIn('docs/install.md', readme)
 
 
 if __name__ == '__main__':
