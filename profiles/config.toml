@@ -1,4 +1,6 @@
-# ALS 0.3.0 defaults; existing configs use a reversible, validated overlay.
+# Astra–Luna–Sol model defaults. Project mode merges these keys reversibly into
+# .codex/config.toml; global mode installs this file as $CODEX_HOME/als.config.toml
+# (opt in with `codex --profile als`). Role pins live in agents/*.toml.
 model = "gpt-6-astra"
 model_reasoning_effort = "medium"
 approval_policy = "on-request"
