@@ -249,6 +249,23 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
         self.assertIn('--adopt', text)
         self.ok(self.glob('--adopt'))
 
+    def test_printed_remedy_carries_custom_als_home(self):
+        custom = self.base / "custom 'home'"
+        self.env['ALS_HOME'] = str(custom)
+        self.ok(self.glob())
+        manifest = custom / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        del data['files']['BIN/als']
+        manifest.write_text(json.dumps(data))
+        del self.env['ALS_HOME']  # the installed `als` supplies its recorded home
+        refused = self.als('install', '--global')
+        self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+        text = refused.stdout + refused.stderr
+        remedy = text.split('take ownership with: ', 1)[1].strip().splitlines()[0]
+        self.assertTrue(remedy.startswith('ALS_HOME='), remedy)
+        self.ok(subprocess.run(['sh', '-c', remedy], capture_output=True, text=True, env=self.env))
+        self.ok(self.als('install', '--global', '--check'))
+
     def test_als_run_without_profile_uses_plain_codex(self):
         self.ok(self.glob())
         (self.codex_home / 'als.config.toml').rename(self.base / 'saved')

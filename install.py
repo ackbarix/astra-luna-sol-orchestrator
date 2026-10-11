@@ -420,7 +420,19 @@ def load_manifest(raw: bytes | None, where: str, remedy: str, default: dict) -> 
 # ------------------------------------------------------------- utilities
 
 def installer_command(*args: str) -> str:
-    return " ".join(["sh", shlex.quote(str(ROOT / "install.sh")), *(shlex.quote(a) for a in args)])
+    """A remedy command the user can paste as-is.
+
+    A non-default ALS_HOME (set by the user, or exported by the installed
+    `als` from its recorded default) must be carried into the command, or the
+    printed remedy would target the default home and be refused."""
+    prefix = []
+    custom = os.environ.get("ALS_HOME")
+    if custom:
+        home = Path(os.environ.get("HOME") or Path.home())
+        default = Path(os.environ.get("XDG_DATA_HOME") or str(home / ".local/share")) / "als"
+        if os.path.realpath(os.path.expanduser(custom)) != os.path.realpath(str(default)):
+            prefix = ["ALS_HOME=" + shlex.quote(custom)]
+    return " ".join(prefix + ["sh", shlex.quote(str(ROOT / "install.sh")), *(shlex.quote(a) for a in args)])
 
 
 def utc_stamp() -> str:
