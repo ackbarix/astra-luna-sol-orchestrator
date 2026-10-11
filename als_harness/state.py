@@ -1,9 +1,10 @@
 """SQLite single source of truth. Reservations and transitions share transactions."""
 from __future__ import annotations
 from contextlib import contextmanager
+import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sqlite3
 from .common import HarnessError, checked_path, private_dir, encoded, now
 
@@ -21,21 +22,73 @@ CREATE INDEX IF NOT EXISTS events_by_run ON events(run,stamp);
 PRAGMA user_version=1;
 '''
 
-def locate(project: Path) -> Path:
+
+SCOPES = ('project', 'global')
+PROJECT_STATE = '.astra-luna-sol/state'
+PROJECT_EVIDENCE = '.astra-luna-sol/evidence'
+DB_NAME = 'runs.sqlite'
+
+
+def _scope(scope):
+    if scope not in SCOPES:
+        raise HarnessError('Unknown state scope: ' + str(scope))
+    return scope
+
+
+def global_base() -> Path:
+    """$ALS_STATE_HOME, else ${XDG_STATE_HOME:-~/.local/state}/als."""
+    explicit = os.environ.get('ALS_STATE_HOME')
+    if explicit:
+        return Path(explicit).expanduser()
+    xdg = os.environ.get('XDG_STATE_HOME')
+    return (Path(xdg).expanduser() if xdg else Path.home() / '.local/state') / 'als'
+
+
+def state_dir(project: Path, scope: str = 'project') -> Path:
+    """Directory holding the database (and, in global scope, evidence)."""
+    root = project.resolve()
+    if _scope(scope) == 'project':
+        return root / PROJECT_STATE
+    return global_base() / hashlib.sha256(str(root).encode('utf-8', 'surrogateescape')).hexdigest()[:16]
+
+
+def locate(project: Path, scope: str = 'project') -> Path:
     """Path of the state database for a project, without creating anything.
 
     Contract (0.5): every caller that needs to know whether state exists or
-    where evidence lives must use this instead of hardcoding paths.
+    where evidence lives must use this (and evidence_root) instead of
+    hardcoding paths. 'project' keeps state inside the worktree;
+    'global' keeps it under a per-project directory outside the worktree.
     """
-    return project.resolve() / '.astra-luna-sol/state/runs.sqlite'
+    return state_dir(project, scope) / DB_NAME
+
+
+def evidence_root(project: Path, scope: str = 'project') -> Path:
+    """Directory that holds verification logs, without creating anything."""
+    if _scope(scope) == 'project':
+        return project.resolve() / PROJECT_EVIDENCE
+    return state_dir(project, scope) / 'evidence'
+
 
 class Store:
-    def __init__(self, project: Path):
+    def __init__(self, project: Path, scope: str = 'project'):
         self.project = project.resolve(strict=True)
-        private_dir(self.project, '.astra-luna-sol/state')
-        self.path = checked_path(self.project, '.astra-luna-sol/state/runs.sqlite')
-        for tail in ('', '-wal', '-shm', '-journal'):
-            checked_path(self.project, '.astra-luna-sol/state/runs.sqlite' + tail)
+        self.scope = _scope(scope)
+        if self.scope == 'project':
+            self.state_dir = private_dir(self.project, PROJECT_STATE)
+            self.path = checked_path(self.project, PROJECT_STATE + '/' + DB_NAME)
+            for tail in ('', '-wal', '-shm', '-journal'):
+                checked_path(self.project, PROJECT_STATE + '/' + DB_NAME + tail)
+        else:
+            base = global_base()
+            base.mkdir(parents=True, exist_ok=True, mode=0o700)
+            folder = state_dir(self.project, 'global')
+            self.state_dir = private_dir(base, folder.name)
+            for tail in ('', '-wal', '-shm', '-journal'):
+                checked_path(self.state_dir, DB_NAME + tail)
+            self.path = self.state_dir / DB_NAME
+            self._write_project_marker()
+        self.evidence_root = evidence_root(self.project, self.scope)
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         os.close(fd)
         os.chmod(self.path, 0o600)
@@ -48,6 +101,54 @@ class Store:
             raise HarnessError('Unsupported future state schema; database left unchanged')
         if not v:
             self.db.executescript(SCHEMA)
+
+    def _write_project_marker(self):
+        """Human-readable pointer from a hashed global directory to its project."""
+        marker = checked_path(self.state_dir, 'project.txt')
+        try:
+            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        except FileExistsError:
+            return
+        with os.fdopen(fd, 'w', encoding='utf-8', errors='surrogateescape') as handle:
+            handle.write(str(self.project) + '\n')
+
+    def evidence_dir(self, rid):
+        """Private per-run evidence directory, created on demand."""
+        if self.scope == 'project':
+            return private_dir(self.project, PROJECT_EVIDENCE + '/' + rid)
+        return private_dir(self.state_dir, 'evidence/' + rid)
+
+    def evidence_record_path(self, path: Path) -> str:
+        """Stored form of a log path: project-relative (project scope) or absolute (global)."""
+        if self.scope == 'project':
+            return str(path.relative_to(self.project))
+        return str(path)
+
+    def evidence_path(self, recorded) -> Path:
+        """Resolve a stored log path; only files inside evidence_root, no symlinks."""
+        if not isinstance(recorded, str) or not recorded or '\x00' in recorded:
+            raise HarnessError('Invalid evidence path')
+        candidate = PurePosixPath(recorded)
+        if self.scope == 'project':
+            if candidate.is_absolute():
+                raise HarnessError('Project-scope evidence paths are project-relative')
+            prefix = PurePosixPath(PROJECT_EVIDENCE)
+            anchor, inner = self.project, candidate
+        else:
+            if not candidate.is_absolute():
+                raise HarnessError('Global-scope evidence paths are absolute')
+            prefix = PurePosixPath('evidence')
+            anchor = self.state_dir
+            inner = PurePosixPath(os.path.relpath(recorded, str(self.state_dir)))
+        if '..' in candidate.parts or '..' in inner.parts:
+            raise HarnessError('Evidence path outside evidence root')
+        try:
+            inner.relative_to(prefix)
+        except ValueError:
+            raise HarnessError('Evidence path outside evidence root') from None
+        if inner == prefix:
+            raise HarnessError('Evidence path outside evidence root')
+        return checked_path(anchor, inner.as_posix())
 
     def close(self):
         self.db.close()
@@ -95,7 +196,7 @@ class Store:
         return bool(cur.rowcount)
 
     def get(self, table, key, col='id'):
-        if (table,col) not in {('sessions','id'),('workers','id'),('cursors','path'),('events','key')}:
+        if (table, col) not in {('sessions', 'id'), ('workers', 'id'), ('cursors', 'path'), ('events', 'key')}:
             raise HarnessError('Unsupported state lookup')
         row = self.db.execute(f'SELECT doc FROM {table} WHERE {col}=?', (key,)).fetchone()
         return json.loads(row['doc']) if row else None
@@ -107,7 +208,7 @@ class Store:
         self.db.execute('INSERT INTO workers VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc', (wid, sid, encoded(data)))
 
     def for_session(self, sid):
-        matches = [r for r in self.runs() if r.get('session') == sid and r['status'] not in {'completed','cancelled'}]
+        matches = [r for r in self.runs() if r.get('session') == sid and r['status'] not in {'completed', 'cancelled'}]
         if len(matches) > 1:
             raise HarnessError('Ambiguous session/run association')
         return matches[0] if matches else None

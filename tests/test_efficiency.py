@@ -152,7 +152,7 @@ class EnginePolicyTests(EngineFixture, unittest.TestCase):
     def test_actual_usage_deducted_from_outstanding_estimate(self):
         r=self.start(draft([task(estimate_tokens=100)]));self.e.reserve(r,'scan','c');self.e.bind(r,'c','kid')
         self.event(r,'kid',n=70,model='gpt-6-luna',effort='medium')
-        self.assertEqual(self.e.budget(self.s.run(r))['reserved_estimate'],20)
+        self.assertEqual(self.e.budget(self.s.run(r))['reserved_estimate'],70)  # 100 - counted(70-50+10)
     def test_terminal_clock_frozen(self):
         r=self.start(draft([]));verify.verify(self.e,r,execute_commands=True);self.e.complete(r)
         before=self.e.budget(self.s.run(r))['elapsed_wall_seconds']

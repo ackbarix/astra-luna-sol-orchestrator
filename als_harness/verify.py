@@ -7,83 +7,153 @@ import signal
 import subprocess
 import time
 import uuid
-from .common import ACTIVE, HarnessError, checked_path, digest, now, private_dir, redact
+from .common import ACTIVE, HarnessError, checked_path, digest, now, process_start, redact
+from .engine import holds_claim
 from .snapshot import capture
 
 MAX_LOG = 65536
 
-def execute(argv, project, timeout):
-    """Bounded memory/time; kill ONLY our process group on timeout/leftover pipes."""
-    proc = subprocess.Popen(argv,cwd=project,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                            stdin=subprocess.DEVNULL,start_new_session=True)
-    data, truncated, expired = bytearray(),False,False
-    select=selectors.DefaultSelector();select.register(proc.stdout,selectors.EVENT_READ)
-    end=time.monotonic()+timeout
+
+def execute(argv, project, timeout, on_spawn=None):
+    """Bounded memory/time; kill ONLY our process group on timeout/leftover pipes.
+
+    on_spawn(proc) runs before any waiting so the caller can persist the new
+    process group; if it raises, the group is killed and the error propagates.
+    """
+    proc = subprocess.Popen(argv, cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL, start_new_session=True)
+    data = bytearray()
+    truncated = False
+    expired = False
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
     try:
-        while select.get_map():
-            if time.monotonic()>=end:
-                expired=True;break
-            for key,_ in select.select(min(.1,max(0,end-time.monotonic()))):
-                chunk=os.read(key.fileobj.fileno(),8192)
-                if not chunk: select.unregister(key.fileobj);continue
-                space=MAX_LOG-len(data);data.extend(chunk[:max(0,space)])
-                truncated |= len(chunk)>space
+        if on_spawn is not None:
+            on_spawn(proc)
+        while selector.get_map():
+            if time.monotonic() >= deadline:
+                expired = True
+                break
+            for key, _ in selector.select(min(.1, max(0, deadline - time.monotonic()))):
+                chunk = os.read(key.fileobj.fileno(), 8192)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                space = MAX_LOG - len(data)
+                data.extend(chunk[:max(0, space)])
+                truncated |= len(chunk) > space
         if not expired:
-            try:proc.wait(timeout=max(.01,end-time.monotonic()))
-            except subprocess.TimeoutExpired:expired=True
+            try:
+                proc.wait(timeout=max(.01, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                expired = True
     finally:
         # Child descendants belong to this new group; never kill arbitrary workers.
-        try:os.killpg(proc.pid,signal.SIGKILL)
-        except ProcessLookupError:pass
-        proc.wait();select.close();proc.stdout.close()
-    return {'exit_code':proc.returncode,'timed_out':expired,'truncated':truncated,
-            'log':redact(data.decode('utf-8',errors='replace'))}
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        selector.close()
+        proc.stdout.close()
+    return {'exit_code': proc.returncode, 'timed_out': expired, 'truncated': truncated,
+            'log': redact(data.decode('utf-8', errors='replace'))}
 
 
-def verify(engine,rid,check_id=None,execute_commands=False):
-    s=engine.s
+def _write_claim(task):
+    return bool(task['write_paths']) and (holds_claim(task) or bool(task.get('claims_held')))
+
+
+def verify(engine, rid, check_id=None, execute_commands=False):
+    """Run declared checks under the global verification lock.
+
+    Final verification (no check_id) requires that no non-terminal run has
+    an active worker or a held write claim. A task-level check (check_id)
+    may run while other work is active, provided THIS run holds no write
+    claim: read-only workers anywhere and writers in other runs do not
+    block it, and a concurrent code change is still detected by the
+    before/after snapshot and fails the check. The lock records this
+    process and, before waiting, the check's process group so a stale lock
+    (killed verify process) can be detected and cleared.
+    """
+    s = engine.s
     if not execute_commands:
-        r=s.run(rid)
-        return {'executed':False,'checks':r['plan']['checks'],'message':'Use --execute only after reviewing the declared argv commands.'}
-    before=capture(s.project); ticket=uuid.uuid4().hex
+        run = s.run(rid)
+        return {'executed': False, 'checks': run['plan']['checks'],
+                'message': 'Use --execute only after reviewing the declared argv commands.'}
+    before = capture(s.project)
+    ticket = uuid.uuid4().hex
     with s.tx():
-        r=s.run(rid)
-        if r['status']!='running':raise HarnessError('Verification requires running run')
-        if any(t['status'] in ACTIVE or (t['write_paths'] and t.get('claims_held')) for t in s.tasks()):
+        if engine.live_verifications():
+            raise HarnessError('Another verification owns the worktree')
+        run = s.run(rid)
+        if run['status'] != 'running':
+            raise HarnessError('Verification requires running run')
+        live = engine.live_tasks()
+        if check_id:
+            if any(_write_claim(t) for t in live if t['run'] == rid):
+                raise HarnessError('Finish or release this run\'s write claims before task-level checks')
+        elif any(t['status'] in ACTIVE or _write_claim(t) for t in live):
             raise HarnessError('Stop/finish active workers and release write claims before final checks')
-        if any(x.get('verification') for x in s.runs()):raise HarnessError('Another verification owns the worktree')
-        checks=[c for c in r['plan']['checks'] if not check_id or c['id']==check_id]
-        if not checks:raise HarnessError('No matching checks')
-        r['verification']={'ticket':ticket,'started':now(),'pid':os.getpid()};s.save_run(r)
-    results=[]
+        checks = [c for c in run['plan']['checks'] if not check_id or c['id'] == check_id]
+        if not checks:
+            raise HarnessError('No matching checks')
+        run['verification'] = engine.new_verification_lock(ticket)
+        s.save_run(run)
+
+    def lost_lock(run):
+        return (run.get('verification') or {}).get('ticket') != ticket or run['status'] != 'running'
+
+    def record_group(proc, check_id):
+        with s.tx():
+            run = s.run(rid)
+            if lost_lock(run):
+                raise HarnessError('Run paused/cancelled/reconciled while verification was running; evidence not accepted')
+            run['verification'].update(pgid=proc.pid, pgid_start=process_start(proc.pid), check=check_id)
+            s.save_run(run)
+
+    results = []
     try:
-        folder=private_dir(s.project,'.astra-luna-sol/evidence/'+rid)
-        for c in checks:
-            record={'id':c['id'],'argv':c['argv'],'cwd':str(s.project),'stamp':now(),'snapshot':before['digest']}
+        folder = s.evidence_dir(rid)
+        for check in checks:
+            record = {'id': check['id'], 'argv': check['argv'], 'cwd': str(s.project), 'stamp': now(),
+                      'snapshot': before['digest']}
             try:
-                outcome=execute(c['argv'],s.project,c['timeout'])
+                outcome = execute(check['argv'], s.project, check['timeout'],
+                                  on_spawn=lambda proc, key=check['id']: record_group(proc, key))
             except OSError as ex:
-                outcome={'exit_code':None,'timed_out':False,'truncated':False,'log':type(ex).__name__}
-            after=capture(s.project)
-            record.update({k:v for k,v in outcome.items() if k!='log'})
-            record['status']='passed' if outcome['exit_code']==0 and not outcome['timed_out'] and after['digest']==before['digest'] else 'failed'
-            record['code_changed_during_check']=after['digest']!=before['digest']
-            filename=c['id']+'-'+ticket+'.log'
-            path=checked_path(s.project,'.astra-luna-sol/evidence/'+rid+'/'+filename)
-            fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
-            with os.fdopen(fd,'w',encoding='utf-8') as f:f.write(outcome['log'])
-            record['log_path']=str(path.relative_to(s.project));record['log_sha256']=digest(outcome['log'].encode())
+                outcome = {'exit_code': None, 'timed_out': False, 'truncated': False, 'log': type(ex).__name__}
+            after = capture(s.project)
+            record.update({k: v for k, v in outcome.items() if k != 'log'})
+            unchanged = after['digest'] == before['digest']
+            record['status'] = 'passed' if outcome['exit_code'] == 0 and not outcome['timed_out'] and unchanged else 'failed'
+            record['code_changed_during_check'] = not unchanged
+            filename = check['id'] + '-' + ticket + '.log'
+            path = checked_path(folder, filename)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                handle.write(outcome['log'])
+            record['log_path'] = s.evidence_record_path(path)
+            record['log_sha256'] = digest(outcome['log'].encode())
             with s.tx():
-                r=s.run(rid)
-                if (r.get('verification') or {}).get('ticket')!=ticket or r['status']!='running':
+                run = s.run(rid)
+                if lost_lock(run):
                     raise HarnessError('Run paused/cancelled/reconciled while verification was running; evidence not accepted')
-                r['evidence'][c['id']]=record;r['last_snapshot']=after['digest'];s.save_run(r)
-                s.event('check:'+ticket+':'+c['id'],rid,'check_finished',{'check':c['id'],'status':record['status']})
+                run['verification'].update(pgid=None, pgid_start=None, check=None)
+                run['evidence'][check['id']] = record
+                run['last_snapshot'] = after['digest']
+                s.save_run(run)
+                s.event('check:' + ticket + ':' + check['id'], rid, 'check_finished',
+                        {'check': check['id'], 'status': record['status']})
             results.append(record)
-            if record['code_changed_during_check']:break
+            if record['code_changed_during_check']:
+                break
     finally:
         with s.tx():
-            r=s.run(rid)
-            if (r.get('verification') or {}).get('ticket')==ticket:
-                r['verification']=None;s.save_run(r)
-    return {'executed':True,'passed':bool(results) and all(x['status']=='passed' for x in results),'results':results}
+            run = s.run(rid)
+            if (run.get('verification') or {}).get('ticket') == ticket:
+                run['verification'] = None
+                s.save_run(run)
+    return {'executed': True, 'passed': bool(results) and all(x['status'] == 'passed' for x in results),
+            'results': results}
