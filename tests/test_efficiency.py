@@ -45,10 +45,10 @@ class RoutingTests(unittest.TestCase):
     def test_role_conflict_needs_reason(self):
         with self.assertRaises(HarnessError):f.prepare(draft([task(role='als_worker')]))
     def test_explicit_role_reason(self):
-        t=task(role='als_hard_worker',role_override_reason='Harder than initial classification')
+        t=task(kind='implementation',role='als_hard_worker',role_override_reason='Harder than initial classification')
         self.assertEqual(f.prepare(draft([t]))['tasks'][0]['role'],'als_hard_worker')
     def test_high_risk_never_silently_downshift(self):
-        with self.assertRaises(HarnessError):f.prepare(draft([task(risk='high',role='als_explorer',role_override_reason='cheap')]))
+        with self.assertRaises(HarnessError):f.prepare(draft([task(kind='implementation',risk='high',role='als_explorer',role_override_reason='cheap')]))
     def test_invalid_enum(self):
         for key in ('kind','complexity','risk'):
             with self.assertRaises(HarnessError):f.prepare(draft([task(**{key:'invented'})]))
@@ -207,7 +207,7 @@ class HistoryTests(EngineFixture, unittest.TestCase):
         self.assertFalse(a.history(self.s,'bounded-fix')['eligible'])
         self.sample(4)
         h=a.history(self.s,'bounded-fix');self.assertTrue(h['eligible']);self.assertTrue(h['estimates'])
-        self.assertEqual(next(iter(h['estimates'].values()))['suggested_tokens'],138)
+        self.assertEqual(next(iter(h['estimates'].values()))['suggested_tokens'],75)
     def test_smoke_tests_excluded(self):
         for i in range(5):self.sample(i,purpose='diagnostic')
         self.assertEqual(a.history(self.s,'bounded-fix')['reviewed_runs'],0)

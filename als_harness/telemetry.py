@@ -7,12 +7,21 @@ from __future__ import annotations
 from collections import defaultdict
 import json
 import math
-from .common import HarnessError, ROLES, TERMINAL, now
-from .efficiency import bucket, short
+from .common import HarnessError, ROLES, TERMINAL, counted_tokens, now
+from .efficiency import PROFILES, bucket, short
 
 FIELDS = ('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens')
 MIN_RUNS = 5
 HISTORY_LIMIT = 50
+REPORT_SCHEMAS = {1, 2}
+# Run warnings that do not affect counted usage integrity. Anything else (missing
+# sources, conflicts, post-closure work, legacy cumulative-only data) disqualifies.
+BENIGN_WARNING_PREFIXES = ('no response ID', 'not_reported:cached_input_tokens', 'reported_total_differs')
+NO_REDUCTION = max(p['max_concurrent'] for p in PROFILES.values())
+
+
+def benign(warning):
+    return isinstance(warning, str) and warning.startswith(BENIGN_WARNING_PREFIXES)
 
 
 def count(value):
@@ -22,9 +31,10 @@ def count(value):
 
 
 def metrics(data):
-    """Analyze ALS schema-1 run reports. No session text or source code exported."""
-    if not isinstance(data, dict) or data.get('schema_version') != 1:
-        raise HarnessError('Expected an ALS harness schema-1 run report')
+    """Analyze ALS run reports (schema 1 or 2). No session text or source code exported."""
+    if (not isinstance(data, dict) or data.get('schema_version') not in REPORT_SCHEMAS
+            or not isinstance(data.get('workers'), list)):
+        raise HarnessError('Expected an ALS harness run report (schema 1 or 2 with workers)')
     rows = data.get('usage_by_thread_model_effort', [])
     if not isinstance(rows, list):
         raise HarnessError('Invalid usage rows')
@@ -73,7 +83,9 @@ def metrics(data):
     return {
         'run': data.get('run'), 'status': data.get('status'),
         'recorded_totals': total | {'total_tokens': raw, 'uncached_input_tokens': uncached,
-                                     'uncached_plus_output_tokens': uncached+total['output_tokens']},
+                                     'uncached_plus_output_tokens': uncached+total['output_tokens'],
+                                     # Budget/estimate unit (common.counted_tokens); raw totals above are diagnostics.
+                                     'counted_tokens': counted_tokens(total)},
         'input_cache_fraction': round(total['cached_input_tokens']/total['input_tokens'], 4) if total['input_tokens'] else None,
         'head_fraction_of_recorded_total': round(head_raw/raw, 4) if raw else None,
         'head_responses': head_responses, 'all_responses': responses,
@@ -111,18 +123,23 @@ def review_measurement(engine, rid, workload, quality, acknowledge, elapsed_seco
 def history(store, workload):
     """At least five distinct reviewed production runs; failed runs remain included.
 
-    P80 + 25% is a cautious starting heuristic, not a token guarantee. Uses only
-    same-workload, same-role/kind/complexity/risk cohorts. No auto model changes.
+    P80 + 25% of counted tokens (uncached input + output) is a cautious starting
+    heuristic, not a token guarantee. Uses only same-workload,
+    same-role/kind/complexity/risk cohorts. No auto model changes. Failed attempts
+    that never bound a thread or recorded no usage are zero-cost failures, not
+    disqualifiers; only usage-integrity problems exclude a run.
     """
     result = {'workload': workload, 'eligible': False, 'reviewed_runs': 0, 'estimates': {},
               'suggested_max_concurrent': 3, 'minimum_runs': MIN_RUNS,
-              'automatic_changes': False, 'warnings': []}
+              'automatic_changes': False, 'warnings': [], 'estimate_unit': 'counted_tokens'}
     if store is None:
         result['warnings'].append('No local history. Retain provisional profile and explicit user budget.')
         return result
     candidates = [json.loads(x['doc']) for x in store.db.execute(
         'SELECT doc FROM runs ORDER BY rowid DESC LIMIT ?', (HISTORY_LIMIT,))]
-    samples = defaultdict(list); eligible_runs = []; qualities = []; retry_runs = 0
+    samples = defaultdict(list)
+    eligible_runs, qualities = [], []
+    retry_runs = failed_attempts = 0
     for r in candidates:
         m = r.get('measurement', {})
         if (r.get('status') not in TERMINAL or r.get('plan', {}).get('purpose') != 'production'
@@ -130,47 +147,60 @@ def history(store, workload):
             or r.get('plan', {}).get('workload') != workload or m.get('quality') not in {'pass','fail'}):
             continue
         tasks = store.tasks(r['id'])
-        if r.get('warnings') or any(t.get('claims_held') for t in tasks):
+        if not all(benign(w) for w in r.get('warnings') or []) or any(t.get('claims_held') for t in tasks):
             continue
         records = [json.loads(x['doc']) | {'thread': x['thread']} for x in store.db.execute(
             'SELECT thread,doc FROM usage WHERE run=?', (r['id'],))]
         if not records:
             continue
-        by_thread = defaultdict(int); identities = defaultdict(set)
+        by_thread, identities = defaultdict(int), defaultdict(set)
         try:
             for ev in records:
-                u = ev['usage']; raw = count(u['input_tokens']) + count(u['output_tokens'])
-                by_thread[ev['thread']] += raw
+                u = ev['usage']
+                checked = {k: count(u.get(k, 0)) for k in ('input_tokens', 'cached_input_tokens', 'output_tokens')}
+                if checked['cached_input_tokens'] > checked['input_tokens']:
+                    raise HarnessError('cache exceeds input')
+                by_thread[ev['thread']] += counted_tokens(checked)
                 identities[ev['thread']].add((ev['model'], ev['effort']))
-        except (KeyError, TypeError, HarnessError):
+        except (KeyError, TypeError, AttributeError, HarnessError):
             continue
         # Missing head/worker records or identity mismatches cannot guide budgets.
         if not r.get('session') or not by_thread[r['session']]:
             continue
-        cohort = []
-        valid = True
+        cohort, valid, run_failed_attempts = [], True, 0
         for t in tasks:
             if t.get('executor') == 'head' or not t.get('attempts'):
                 continue
-            threads = [a.get('thread_id') for a in t['attempts']]
-            if any(not tid or not by_thread[tid] for tid in threads):
-                valid = False; break
+            threads = set()
             for a in t['attempts']:
-                expected = (a['requested_model'], a['requested_effort'])
-                if identities[a['thread_id']] != {expected}:
-                    valid = False; break
+                tid = a.get('thread_id')
+                if not tid or not by_thread[tid]:
+                    # Unbound or usage-free attempt: a zero-cost failure if it did not
+                    # succeed; a successful attempt without usage is an integrity gap.
+                    if a.get('status') == 'completed':
+                        valid = False
+                        break
+                    run_failed_attempts += 1
+                    continue
+                if identities[tid] != {(a.get('requested_model'), a.get('requested_effort'))}:
+                    valid = False
+                    break
+                threads.add(tid)
+                run_failed_attempts += a.get('status') == 'failed'
             if not valid:
                 break
             # Include all retry costs but do not misassign different-model retries
             # to the final role's cost bucket.
-            if len({(a['requested_model'],a['requested_effort']) for a in t['attempts']}) > 1:
+            if len({(a.get('requested_model'), a.get('requested_effort')) for a in t['attempts']}) > 1:
                 continue
-            if all(k in t for k in ('role','kind','complexity','risk')):
-                cohort.append((bucket(t), sum(by_thread[tid] for tid in set(threads))))
+            if threads and all(k in t for k in ('role', 'kind', 'complexity', 'risk')):
+                cohort.append((bucket(t), sum(by_thread[tid] for tid in threads)))
         if not valid:
             continue
-        eligible_runs.append(r['id']); qualities.append(m['quality'])
-        retry_runs += any(len(t.get('attempts', [])) > 1 for t in tasks)
+        eligible_runs.append(r['id'])
+        qualities.append(m['quality'])
+        failed_attempts += run_failed_attempts
+        retry_runs += bool(run_failed_attempts) or any(len(t.get('attempts', [])) > 1 for t in tasks)
         for key, value in cohort:
             samples[key].append((r['id'], value))
     result['reviewed_runs'] = len(eligible_runs)
@@ -181,7 +211,17 @@ def history(store, workload):
     result['run_ids'] = eligible_runs
     failure_fraction = qualities.count('fail')/len(qualities)
     result['failure_fraction'] = round(failure_fraction, 3)
-    result['suggested_max_concurrent'] = 1 if failure_fraction >= .4 else 2 if failure_fraction > .1 or retry_runs/len(qualities) > .2 else 3
+    result['failed_attempts'] = failed_attempts
+    result['retry_or_failed_attempt_runs'] = retry_runs
+    # Only failures/retries reduce parallelism; clean history never clamps a profile.
+    if failure_fraction >= .4:
+        result['suggested_max_concurrent'] = 1
+    elif failure_fraction > .1 or retry_runs/len(qualities) > .2:
+        result['suggested_max_concurrent'] = 2
+    elif failure_fraction or retry_runs:
+        result['suggested_max_concurrent'] = 3
+    else:
+        result['suggested_max_concurrent'] = NO_REDUCTION
     for key, group in samples.items():
         ids = sorted({rid for rid,_ in group})
         if len(ids) < MIN_RUNS:
