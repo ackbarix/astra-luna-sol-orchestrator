@@ -164,8 +164,19 @@ class Engine:
         return [t for t in self.s.tasks() if t['run'] not in closed]
 
     def root(self, run):
-        """Checkout the run works in (see Store.run_root)."""
-        return self.s.run_root(run)
+        """Validated checkout the run works in (see Store.checked_run_root)."""
+        return self.s.checked_run_root(run)
+
+    def same_root_runs(self, run):
+        """Ids of runs working in the same checkout as run (itself included).
+
+        Write claims, the writer cap, the final-verify active-worker gate and
+        the verification lock protect files, so they only apply among runs
+        whose resolved worktree (Store.run_key) is equal: two linked
+        worktrees of one repository never share a file path. `resources`
+        (ports, databases, other external state) stay global."""
+        key = self.s.run_key(run)
+        return {r['id'] for r in self.s.runs() if self.s.run_key(r) == key}
 
     def snapshot(self, rid):
         return capture(self.root(self.s.run(rid)))
@@ -234,11 +245,13 @@ class Engine:
                       'check': lock.get('check'), 'check_group_killed': killed})
         return killed
 
-    def live_verifications(self):
-        """Runs holding a live verification lock. Must run inside a
+    def live_verifications(self, same_as=None):
+        """Runs holding a live verification lock (only those sharing
+        same_as's worktree when given; see same_root_runs). Must run inside a
         transaction: stale locks (dead owner) and locks left on terminal runs
         are cleared and recorded as verification_lock_cleared events."""
         live = []
+        scope = self.same_root_runs(same_as) if same_as is not None else None
         for run in self.s.runs():
             lock = run.get('verification')
             if not lock:
@@ -247,7 +260,8 @@ class Engine:
                 self.release_verification(run, 'run is ' + run['status'])
                 self.s.save_run(run)
             elif self.verification_live(lock, run):
-                live.append(run)
+                if scope is None or run['id'] in scope:
+                    live.append(run)
             else:
                 self.release_verification(run, 'verify process no longer running')
                 self.s.save_run(run)
@@ -328,6 +342,9 @@ class Engine:
                 reasons.append('dependency not completed')
             all_tasks = self.live_tasks()
             held = [t for t in all_tasks if holds_claim(t)]
+            # Files are per worktree; resources are global (see same_root_runs).
+            local = self.same_root_runs(run)
+            held_here = [t for t in held if t['run'] in local]
             active = [t for t in all_tasks
                       if t['run'] == rid and t['status'] in ACTIVE and t.get('executor') != 'head']
             policy = run['plan'].get('efficiency', {})
@@ -336,14 +353,15 @@ class Engine:
                 reasons.append('six-child capacity reached' if max_children == 6
                                else 'optimized concurrent worker limit reached')
             max_writers = policy.get('max_writers', 2)
-            if task['write_paths'] and sum(bool(t['write_paths']) for t in held) >= max_writers:
+            if task['write_paths'] and sum(bool(t['write_paths']) for t in held_here) >= max_writers:
                 reasons.append('two-writer capacity reached' if max_writers == 2
                                else 'high-risk single-writer limit reached')
             for other in held:
-                paths_overlap = any(overlap(a, b) for a in task['write_paths'] for b in other['write_paths'])
+                paths_overlap = other['run'] in local and any(
+                    overlap(a, b) for a in task['write_paths'] for b in other['write_paths'])
                 if paths_overlap or set(task['resources']) & set(other['resources']):
                     reasons.append('resource owned by ' + other['run'] + '/' + other['id'])
-            if self.live_verifications():
+            if self.live_verifications(same_as=run):
                 reasons.append('verification owns stable worktree')
             budget = self.budget(run)
             if budget['stage'] == 'stop_new_work':

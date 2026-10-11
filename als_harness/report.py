@@ -56,3 +56,24 @@ def compact(data):
             'checks': [{'id': c['id'], 'status': c['status']} for c in data['checks']],
             'recorded_tokens': data['budget']['confirmed_tokens'],
             'problems': data['completion_problems'], 'warnings': data['warnings']}
+
+
+def run_text(data):
+    """Human-readable `status --run ID --format text` for a full report or
+    its compact() form."""
+    tasks = data.get('tasks', data.get('workers', []))
+    tokens = data.get('recorded_tokens', (data.get('budget') or {}).get('confirmed_tokens'))
+    lines = ['ALS run ' + str(data['run']) + ': ' + str(data['status']) + ' (mode ' + str(data['mode']) + ')']
+    if data.get('goal'):
+        lines.append('goal:   ' + redact(data['goal'])[:200])
+    lines.append('tokens: ' + str(tokens) + ' recorded (not billing)')
+    lines.append('%-20s  %-18s  %-20s  %s' % ('TASK', 'ROLE', 'STATUS', 'ATTEMPTS'))
+    for t in tasks:
+        attempts = t.get('attempts')
+        lines.append('%-20s  %-18s  %-20s  %s' % (t.get('id'), t.get('role') or '-', t.get('status'),
+                                                   len(attempts) if isinstance(attempts, list) else '-'))
+    for check in data.get('checks', []):
+        lines.append('check ' + str(check.get('id')) + ': ' + str(check.get('status')))
+    lines += ['problem: ' + redact(p) for p in data.get('completion_problems', data.get('problems', []))]
+    lines += ['warning: ' + redact(w) for w in data.get('warnings', [])]
+    return '\n'.join(lines)
