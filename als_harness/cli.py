@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -31,6 +32,17 @@ def detect_scope(home=HOME):
     if home.name == '.astra-luna-sol' and (home / 'harness.py').is_file():
         return 'project'
     return 'global'
+
+
+def hint_cmd():
+    """The command users should type in follow-up hints.
+
+    `als` when it is on PATH (it resolves the project and prefers a project
+    harness); otherwise this harness by absolute path, so the hint also works
+    from subdirectories, worktrees and global installs without `als`."""
+    if shutil.which('als'):
+        return 'als'
+    return shlex.quote(sys.executable) + ' ' + shlex.quote(str(HOME / 'harness.py'))
 
 
 def git_project(cwd):
@@ -375,7 +387,7 @@ def read_plan(path):
         return json.loads(raw)
     except ValueError as ex:
         raise HarnessError('Plan is not valid JSON (' + str(ex)[:120] + ').'
-                           ' Next: fix the file, then harness.py prepare --plan <file> to validate it.') from ex
+                           ' Next: fix the file, then ' + hint_cmd() + ' prepare --plan <file> to validate it.') from ex
 
 
 def status_rows(store, everything=False):
@@ -387,7 +399,7 @@ def status_text(out):
     if 'runs' not in out:
         return None
     if not out['runs']:
-        return (out.get('note') or 'No unfinished runs') + '. Next: harness.py start --plan <plan.json>'
+        return (out.get('note') or 'No unfinished runs') + '. Next: ' + hint_cmd() + ' start --plan <plan.json>'
     lines = ['%-16s  %-9s  %-8s  %-20s  %s' % ('RUN', 'STATUS', 'MODE', 'SESSION', 'UPDATED')]
     for r in out['runs']:
         updated = r.get('updated')
@@ -400,17 +412,18 @@ def status_text(out):
 def next_step(args, message):
     """One concrete follow-up command for common mistakes; None when there is no obvious one."""
     run = getattr(args, 'run', None) or '<run>'
+    h = hint_cmd()
     hints = (
-        ('Unknown run', 'harness.py status --all  (lists run ids)'),
-        ('Unknown task', 'harness.py status --run ' + run + '  (lists task ids)'),
-        ('No managed runs', 'harness.py start --plan <plan.json>'),
-        ('Worktree/HEAD differs', 'git status; after reviewing: harness.py resume --run ' + run + ' --accept-drift'),
-        ('Confirm old workers', 'after confirming no worker is still running: harness.py resume --run ' + run
+        ('Unknown run', h + ' status --all  (lists run ids)'),
+        ('Unknown task', h + ' status --run ' + run + '  (lists task ids)'),
+        ('No managed runs', h + ' start --plan <plan.json>'),
+        ('Worktree/HEAD differs', 'git status; after reviewing: ' + h + ' resume --run ' + run + ' --accept-drift'),
+        ('Confirm old workers', 'after confirming no worker is still running: ' + h + ' resume --run ' + run
          + ' --workers-stopped'),
-        ('Confirm worker stopped', 'after confirming the worker stopped: harness.py finish --run ' + run
+        ('Confirm worker stopped', 'after confirming the worker stopped: ' + h + ' finish --run ' + run
          + ' --task <task> --note <result> --workers-stopped'),
-        ('Session already has an unfinished run', 'harness.py status  (then resume or cancel that run)'),
-        ('Guarded mode needs', 'harness.py start --plan <plan.json> --mode observe  (guarded needs real hook'
+        ('Session already has an unfinished run', h + ' status  (then resume or cancel that run)'),
+        ('Guarded mode needs', h + ' start --plan <plan.json> --mode observe  (guarded needs real hook'
          ' receipts and --ack-hook-limits)'),
         ('Plan file too large', 'shrink the plan below 256 KiB'),
     )
@@ -573,7 +586,8 @@ def main(argv=None):
                 out = doctor(project, None, args.probe, args.scope, not args.no_probe, not args.no_deps)
                 code = out['exit_code']
             else:
-                out = {'runs': [], 'note': 'No managed runs registered', 'next': 'harness.py start --plan <plan.json>'}
+                out = {'runs': [], 'note': 'No managed runs registered',
+                       'next': hint_cmd() + ' start --plan <plan.json>'}
             emit(args, out)
             return code
         store = open_store(project, args.scope, hook=args.cmd == 'hook')
@@ -592,7 +606,7 @@ def main(argv=None):
             # state. Runtime hook errors may fail open in Codex: not a sandbox.
             print(json.dumps(hooks.warn('ALS unavailable: ' + type(ex).__name__
                                         + '. No completion certification or automatic recovery.'
-                                        + ' Inspect harness.py doctor.')))
+                                        + ' Inspect: ' + hint_cmd() + ' doctor')))
             return 0
         message = redact(str(ex)) if str(ex) else type(ex).__name__
         if isinstance(ex, FileNotFoundError):

@@ -121,7 +121,8 @@ class EaseTests(unittest.TestCase):
         rid = json.loads(self.main('start', '--plan', str(plan), '--session', 'a')[1])['run']
         code, _, err = self.main('status', '--run', 'missing')
         self.assertEqual(code, 2)
-        self.assertIn('Next: harness.py status', err)
+        # The hint is a runnable command: `als` on PATH, else this harness by absolute path.
+        self.assertRegex(err, r'Next: (als|\S+ \S*harness\.py) status --all')
         code, _, err = self.main('start', '--plan', str(Path(self.tmp.name) / 'absent.json'))
         self.assertEqual(code, 2)
         self.assertIn('Next:', err)
