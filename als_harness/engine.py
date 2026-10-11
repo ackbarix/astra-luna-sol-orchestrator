@@ -8,7 +8,7 @@ import signal
 import subprocess
 import uuid
 from .common import (ACTIVE, TERMINAL, ROLES, HarnessError, boot_id, checked_path, counted_tokens, digest, ident,
-                     current_uid, now, overlap, process_alive, process_start, relative)
+                     current_uid, now, overlap, process_alive, process_info, process_start, relative)
 from .snapshot import capture
 from . import efficiency, usage
 
@@ -239,7 +239,14 @@ class Engine:
         start = lock.get('pgid_start')
         if type(pgid) is not int or pgid <= 1 or start is None:
             return False
-        if lock.get('boot_id') != boot_id() or not process_alive(pgid, start, lock.get('uid')):
+        if lock.get('boot_id') != boot_id():
+            return False
+        # Killing needs positive proof of identity (readable, same start, not
+        # a zombie). process_alive() treats "unknown" as alive, which is the
+        # safe answer for keeping a lock but the unsafe one for SIGKILL: an
+        # unreadable, recycled pgid must never be signalled.
+        info = process_info(pgid)
+        if info is None or info[0] in ('Z', 'X') or info[1] != start:
             return False
         try:
             if os.getpgid(pgid) != pgid:

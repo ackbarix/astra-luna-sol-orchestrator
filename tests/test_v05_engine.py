@@ -553,6 +553,26 @@ class ProcessIdentityFallbackTests(unittest.TestCase):
             self.assertTrue(common.process_alive(4242, 5459))  # legacy lock: no uid
             self.assertTrue(common.process_alive(4242, 5459, os.geteuid() + 1))  # recorded as another uid
 
+
+class KillIdentityTests(EngineCase):
+    def test_unknown_check_group_is_never_killed(self):
+        """Lock keeping treats unknown as alive; killing must not."""
+        from als_harness import engine as engine_module
+        lock = {'pgid': 4242, 'pgid_start': 5459, 'boot_id': engine_module.boot_id(), 'uid': os.geteuid()}
+        with patch.object(engine_module, 'process_info', return_value=None), \
+                patch.object(engine_module.os, 'killpg') as killpg:
+            self.assertFalse(self.e._kill_check_group(lock))
+            killpg.assert_not_called()
+        with patch.object(engine_module, 'process_info', return_value=('S', 9999)), \
+                patch.object(engine_module.os, 'killpg') as killpg:
+            self.assertFalse(self.e._kill_check_group(lock))  # recycled: other start
+            killpg.assert_not_called()
+        with patch.object(engine_module, 'process_info', return_value=('S', 5459)), \
+                patch.object(engine_module.os, 'getpgid', return_value=4242), \
+                patch.object(engine_module.os, 'killpg') as killpg:
+            self.assertTrue(self.e._kill_check_group(lock))
+            killpg.assert_called_once()
+
 class TaskCheckConcurrencyTests(EngineCase):
     def test_task_check_runs_beside_read_only_and_other_run_writers(self):
         rid = self.start([self.task('scan', None, 'als_explorer'), self.task('edit')], session='s1')
