@@ -13,20 +13,34 @@ Usage: als COMMAND [ARGS]
   doctor [--no-probe] [--json]         check dependencies, then the harness in this project
   run [CODEX ARGS]                     start Codex (`codex --profile als` when installed globally)
   plan new FILE                        write a minimal plan JSON template
-  usage [ARGS]                         token usage report for this project (token_usage.py)
+  usage [ARGS]                         token usage report for this project (token_usage.py);
+                                       --latest unless --list/--root/--day/--latest* is given
   status|start|prepare|finish|verify|complete|report|resume|... [ARGS]
                                        harness commands for the current project
   version                              print the ALS version
   help                                 show this help
 
 Environment: ALS_HOME, CODEX_HOME, ALS_BIN_DIR, ALS_PYTHON (default python3).
+`als install --global` records its ALS_HOME and ALS_PYTHON in the installed
+`als`; the environment still overrides them.
 USAGE
 }
 
+# Defaults recorded by the global installer (empty in a clone).
+ALS_DEFAULT_HOME=
+ALS_DEFAULT_PYTHON=
+
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-als_home=${ALS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/als}
+als_home=${ALS_HOME:-${ALS_DEFAULT_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/als}}
 codex_home=${CODEX_HOME:-$HOME/.codex}
-py=${ALS_PYTHON:-python3}
+py=${ALS_PYTHON:-${ALS_DEFAULT_PYTHON:-python3}}
+# The installer, deps check and scripts read these; pass the resolved values on.
+ALS_HOME=$als_home
+export ALS_HOME
+if [ -n "${ALS_PYTHON-}" ] || [ -n "$ALS_DEFAULT_PYTHON" ]; then
+ ALS_PYTHON=$py
+ export ALS_PYTHON
+fi
 
 # Installer/release tree: the clone this script lives in, else the global copy.
 if [ -f "$here/../install.py" ] && [ -f "$here/../als_harness/cli.py" ]; then
@@ -38,14 +52,21 @@ fi
 die() { printf 'als: %s\n' "$*" >&2; exit 2; }
 
 need_python() {
- command -v "$py" >/dev/null 2>&1 || die "python3 (3.9+) not found on PATH; set ALS_PYTHON=/path/to/python3"
+ command -v "$py" >/dev/null 2>&1 || die "$py (Python 3.9+) not found; install it or set ALS_PYTHON=/path/to/python3"
 }
 
 # Main repository root (shared by worktrees), else the current directory.
 # The common dir's parent is the main checkout only when the common dir is a
 # .git directory; a submodule (.git/modules/NAME) uses its top level instead.
+# Git < 2.13 prints a relative common dir relative to the top level even from a
+# subdirectory, so a relative path that does not exist here is resolved
+# against --show-cdup.
 project_root() {
  common=$(git rev-parse --git-common-dir 2>/dev/null) || { pwd -P; return 0; }
+ case $common in
+  /*) ;;
+  *) [ -d "$common" ] || common=$(git rev-parse --show-cdup 2>/dev/null)$common ;;
+ esac
  case $common in
   .git|*/.git) (CDPATH= cd -- "$common/.." && pwd -P) ;;
   *) git rev-parse --show-toplevel 2>/dev/null || pwd -P ;;
@@ -111,7 +132,7 @@ plan_new() {
     }
   ],
   "checks": [
-    {"id": "unit", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"], "timeout": 120}
+    {"id": "unit", "argv": ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"], "timeout": 120}
   ],
   "criteria": [
     {"id": "behavior", "description": "The requested behaviour is confirmed by real results"}
@@ -121,6 +142,22 @@ plan_new() {
 PLAN
  printf 'Wrote %s. Edit %s, then run:\n  als prepare --plan %s > prepared.json\n  als start --plan prepared.json\n' \
   "$file" "$file" "$file"
+}
+
+# A project install older than 0.5 (VERSION < 0.5, or a harness without a
+# VERSION file) whose harness rejects the 0.5 doctor flags; prints its version.
+outdated_project() {
+ [ -f "$1/.astra-luna-sol/harness.py" ] || return 1
+ if [ -f "$1/.astra-luna-sol/VERSION" ]; then
+  ver=$(sed -n '1{s/[[:space:]]//g;p;}' "$1/.astra-luna-sol/VERSION")
+ else
+  ver=
+ fi
+ case $ver in
+  '') printf 'unknown (pre-0.3)\n' ;;
+  0.[0-4]|0.[0-4].*|0.[0-4][!0-9]*) printf '%s\n' "$ver" ;;
+  *) return 1 ;;
+ esac
 }
 
 doctor() {
@@ -141,15 +178,22 @@ doctor() {
  fi
  rc=0
  harness_ok=
- if h=$(harness) && { [ -d "$root/.git" ] || [ -f "$root/.git" ] || [ -f "$root/.astra-luna-sol/harness.py" ]; }; then
+ outdated=
+ nodeps=
+ if outdated=$(outdated_project "$root"); then
+  :
+ elif h=$(harness) && { [ -d "$root/.git" ] || [ -f "$root/.git" ] || [ -f "$root/.astra-luna-sol/harness.py" ]; }; then
   harness_ok=1
+  # bin/als prints the dependency report itself; skip the harness copy when supported.
+  if "$py" "$h" --project "$root" doctor --help 2>/dev/null | grep -q -e '--no-deps'; then nodeps=--no-deps; fi
  fi
+ stale="project install $outdated is outdated: run \`als install\` (upgrade) or \`als uninstall\`"
  if [ -n "$json" ]; then
   # One JSON object on stdout: {"deps": ..., "harness": ... or null}.
   deps_out=$(PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe --json) || rc=$?
   harness_out=
   if [ -n "$harness_ok" ]; then
-   harness_out=$("$py" "$h" --project "$root" doctor $probe) || rc=$?
+   harness_out=$("$py" "$h" --project "$root" doctor $probe $nodeps) || rc=$?
   fi
   "$py" -c 'import json, sys
 def load(text):
@@ -157,13 +201,19 @@ def load(text):
         return json.loads(text) if text.strip() else None
     except ValueError:
         return {"error": "unparseable output", "output": text[:2000]}
-print(json.dumps({"deps": load(sys.argv[1]), "harness": load(sys.argv[2])}, indent=2))' "$deps_out" "$harness_out" || rc=2
+harness = load(sys.argv[2])
+if sys.argv[3]:
+    harness = {"outdated_project_install": sys.argv[3], "message": sys.argv[4]}
+print(json.dumps({"deps": load(sys.argv[1]), "harness": harness}, indent=2))' \
+   "$deps_out" "$harness_out" "$outdated" "$stale" || rc=2
   return "$rc"
  fi
  PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe || rc=$?
- if [ -n "$harness_ok" ]; then
+ if [ -n "$outdated" ]; then
+  printf '\nHarness (%s):\n%s\n' "$root" "$stale"
+ elif [ -n "$harness_ok" ]; then
   printf '\nHarness (%s):\n' "$root"
-  "$py" "$h" --project "$root" doctor --format text $probe || rc=$?
+  "$py" "$h" --project "$root" doctor --format text $probe $nodeps || rc=$?
  fi
  return "$rc"
 }
@@ -192,7 +242,14 @@ case $cmd in
   elif [ -f "$als_home/token_usage.py" ]; then tu=$als_home/token_usage.py
   else tu=$release/scripts/token_usage.py
   fi
-  exec "$py" "$tu" --cwd "$root" "$@" ;;
+  # No selection option: report the latest session (token_usage.py needs one).
+  select=--latest
+  for arg in "$@"; do
+   case $arg in
+    --list|--root|--root=*|--latest|--latest-with-workers|--day|--day=*|-h|--help) select= ;;
+   esac
+  done
+  exec "$py" "$tu" --cwd "$root" "$@" $select ;;
  hook) die "hooks are run by Codex, not by als" ;;
  -*) usage >&2; exit 2 ;;
  *)

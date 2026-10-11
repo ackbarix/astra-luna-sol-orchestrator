@@ -58,7 +58,7 @@ PreToolUse 경로의 거절 결정입니다. 훅이 우회되거나 꺼져 있�
     "write_paths": ["src/validation.py"], "resources": [], "depends_on": [],
     "checks": ["unit"], "estimate_tokens": 0
   }],
-  "checks": [{"id": "unit", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"], "timeout": 120}],
+  "checks": [{"id": "unit", "argv": ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"], "timeout": 120}],
   "criteria": [{"id": "behavior", "description": "요구된 입력 동작을 실제 결과로 확인"}],
   "budget": {"tokens": 0, "seconds": 0}
 }

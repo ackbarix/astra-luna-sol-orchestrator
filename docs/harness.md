@@ -16,10 +16,31 @@ Python/SQLite 하네스가 등록된 개발 작업의 상태·예약·검증·�
 `<hash>` 디렉터리의 부모가 그 경로로 바뀝니다(절대 경로만 허용, 상대 경로는 오류). 상대 경로
 `XDG_STATE_HOME`은 XDG 규격대로 무시합니다. 같은 저장소의 워크트리와 하위 디렉터리는
 모두 메인 저장소 하나로 매핑됩니다. 상태 DB는 WAL 모드이며 명령은 5초, 훅은 2초까지 잠금을
-기다립니다. 프로젝트 상태는 Git에서 무시되며 제거 후에도 남습니다.
+기다립니다. 프로젝트 상태는 Git에서 무시되며 제거 후에도 남습니다. 전역·`--hooks-only` 범위의
+`<hash>/` 디렉터리도 `als uninstall --global`/`--hooks-only` 후에 남으므로, 필요 없으면
+`rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/als/<hash>"`로 지웁니다(경로는 `als doctor --json`의
+`harness.state_path`).
 
-훅 명령에는 프로젝트 절대 경로가 없습니다. 전역 훅은 `python3 "$HOME/.local/share/als/harness.py" hook`,
-프로젝트 훅은 `git rev-parse --git-common-dir`로 저장소를 찾습니다. PreToolUse/PostToolUse 그룹은
+훅 명령에는 프로젝트 절대 경로가 없습니다. 전역(`--hooks-only`) 훅은
+
+```sh
+python3 "${HOME:-/home/me}/.local/share/als/harness.py" hook
+```
+
+형태입니다. `/home/me`는 설치 때의 홈 절대 경로로, HOME이 설정되어 있으면 그 값을, Codex가 HOME 없이
+훅을 실행하면 기록된 경로를 씁니다. `ALS_HOME`이 홈 밖이거나 홈 경로에 따옴표가 필요한 문자가 있으면
+`python3 '/opt/als/harness.py' hook`처럼 절대 경로를 씁니다. Python이 PATH의 `python3`가 아니면
+그 절대 경로가 `python3` 자리에 들어갑니다. 프로젝트 훅은 다음 한 줄입니다.
+
+```sh
+c=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0; case $c in /*) ;; *) [ -d "$c" ] || c=$(git rev-parse --show-cdup 2>/dev/null)$c ;; esac; case $c in .git|*/.git) r=$(CDPATH= cd -- "$c/.." && pwd) ;; *) r=$(git rev-parse --show-toplevel 2>/dev/null) ;; esac || exit 0; s=$r/.astra-luna-sol/harness.py; [ -f "$s" ] || exit 0; exec python3 "$s" hook
+```
+
+`git rev-parse --git-common-dir`로 메인 저장소를 찾고(워크트리·하위 디렉터리 가능), git 2.13 미만이
+하위 디렉터리에서 최상위 기준 상대 경로를 돌려주면 `--show-cdup`으로 보정합니다. 공통 디렉터리가
+`.git`이 아니면(서브모듈) `--show-toplevel`을 씁니다. 하네스가 없거나 저장소 밖이면 0으로 끝납니다.
+이전 형태(0.3/0.4의 절대 경로 + `--project`, 이 보정 전 0.5 형태)는 재설치 때 ALS 그룹으로 인식되어
+교체됩니다. PreToolUse/PostToolUse 그룹은
 `spawn_agent`에만 매칭하므로 다른 도구 호출에는 Python을 띄우지 않습니다. 설치 후 Codex에서
 `/hooks`로 명령을 검토하고 **신뢰**해야 합니다. 설치기는 신뢰 절차를 우회하지 않습니다.
 
@@ -57,7 +78,7 @@ Observe에서도 `complete`는 실패한 검증을 성공으로 인증하지 않
      "resources": [], "depends_on": [], "checks": ["unit"], "estimate_tokens": 20000}
   ],
   "checks": [
-    {"id": "unit", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+    {"id": "unit", "argv": ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"],
      "timeout": 120, "required": true}
   ],
   "criteria": [{"id": "behavior", "description": "요구된 로그인 동작과 오류 처리가 구현됨", "required": true}],
@@ -65,9 +86,13 @@ Observe에서도 `complete`는 실패한 검증을 성공으로 인증하지 않
 }
 ```
 
+- Python 검사에는 `-B`를 권장합니다(`als plan new` 템플릿 기본값). `__pycache__`를 무시하지 않는
+  저장소에서 검사가 바이트코드를 쓰면 검증 중 코드가 바뀐 것으로 판정될 수 있습니다.
 - `start --plan -`은 stdin에서 계획을 읽습니다.
 - `--session`을 생략하면 `CODEX_THREAD_ID`, 없으면(observe만) **최근 10분 안에 훅 이벤트(종류
   무관)가 있었던 세션이 정확히 하나**일 때 그 세션을 쓰고, 고른 세션 ID를 항상 경고로 출력합니다.
+  마지막 이벤트가 SessionEnd인(종료된) 세션은 고르지 않지만 개수에는 포함됩니다. 그래서 종료된
+  세션과 활성 세션이 함께 있으면 둘 이상으로 보고 아무것도 고르지 않습니다.
   여러 개이거나 없으면 추측하지 않고 세션 없이 경고와 함께 시작합니다. guarded는 자동 선택하지
   않으므로 `--session`이 필요합니다.
 - `prepare`를 거치지 않은 초안(`role` 없는 task, `efficiency` 없음)은 `plan not prepared` 오류와 함께
@@ -77,6 +102,11 @@ Observe에서도 `complete`는 실패한 검증을 성공으로 인증하지 않
   위치(cwd), 증거 최신성은 그 워크트리 기준이므로 메인 체크아웃의 변경은 이 run의 증거를 무효화하지
   않습니다. 같은 저장소의 어느 워크트리에서 온 훅 이벤트(SessionStart, PreToolUse, Stop 등)도
   처리합니다. 0.5.0 이전 run(필드 없음)은 메인 저장소를 씁니다.
+  파일 claim(`write_paths` 겹침), 작성자 상한, 최종 검사의 활성 워커 조건, 검증 잠금은 **같은
+  워크트리의 run끼리만** 비교합니다. 다른 연결 워크트리의 run은 같은 파일을 claim해도 충돌하지
+  않습니다. `resources`(포트·DB 등)는 워크트리와 무관하게 전역입니다. run의 워크트리가 삭제되거나
+  옮겨지면 `Run worktree missing or moved (...); cancel the run ...` 오류가 나므로 그 run은 `cancel`하세요
+  (`cancel`·`status`·`finish`는 계속 동작).
 - 계획에는 런타임 전용 task 키(상태·시도 기록 등)를 넣을 수 없습니다. `.git`, `.astra-luna-sol`,
   `.codex` 아래는 작업 소유 경로로 예약되어 있습니다.
 - `0` 예산은 미설정입니다. 토큰 예산은 **비캐시 입력 + 출력** 기준 소프트 예산이며 청구액이 아닙니다.
@@ -127,8 +157,11 @@ als complete --run RUN_ID
 - resume은 코드가 `last_snapshot`과 다를 때만 `--accept-drift`를 요구합니다. `verify`가 끝날 때마다
   `last_snapshot`을 갱신하므로, 검증 후 손대지 않았다면 보통 필요 없습니다. checkout/reset/stash/commit은
   하지 않습니다. 취소·완료된 run은 재개할 수 없습니다.
-- Codex SessionEnd는 run을 자동 pause합니다. 다음 SessionStart 안내에 정확한 resume 명령
-  (전역: `als resume --run ... --session ...`)이 표시되지만 자동 실행하지 않습니다.
+- Codex SessionEnd는 run을 자동 pause합니다. 다음 SessionStart 안내에 정확한 resume 명령이
+  표시되지만 자동 실행하지 않습니다. 전역 범위는 `als resume --run ... --session ...`, 프로젝트 범위는
+  실행 중인 인터프리터와 하네스의 절대 경로(`/usr/bin/python3 /repo/.astra-luna-sol/harness.py
+  --project /repo resume ...`)라 하위 디렉터리·워크트리에서도 그대로 실행됩니다. 그 밖의 SessionStart
+  안내는 전역 범위이거나 `als`가 PATH에 있으면 `als ...`, 아니면 같은 절대 경로 형태를 씁니다.
 - retry는 새 모델을 실행하지 않습니다. 최초 포함 3회, 코드 진척 없는 반복 실패·동일 설명은 거절하고,
   고위험 task를 경량 역할로 낮추거나 읽기 전용 역할에 쓰기 소유를 넘기지 않습니다.
 
@@ -137,14 +170,16 @@ als complete --run RUN_ID
 `verify --execute`는 종료 코드·시간초과·로그 해시·코드 fingerprint를 기록합니다. 검사 중 코드가
 바뀌면 실패로 기록하고 이후 검사를 멈춥니다. 로그는 로컬 0600, 64KiB 제한이며 알려진 비밀 형태를
 마스킹하지만 완전한 제거를 보장하지 않습니다. 통과해도 모든 버그가 없다는 뜻은 아닙니다.
+fingerprint는 추적되지 않는 `__pycache__/`와 `*.pyc`/`*.pyo` 파일을 제외하고(추적 중인 바이트코드는
+포함), 검사는 `PYTHONDONTWRITEBYTECODE=1`로 실행합니다.
 
-- **전역 검증 잠금:** 한 번에 하나의 verify만 워크트리를 소유합니다. 잠금에는 verify 프로세스
+- **워크트리별 검증 잠금:** 워크트리마다 한 번에 하나의 verify만 그 워크트리를 소유합니다. 잠금에는 verify 프로세스
   PID·시작 시각·부팅 ID와 실행 중인 검사의 프로세스 그룹이 기록됩니다. 프로세스가 사라졌거나
   PID가 재사용됐거나 재부팅된 잠금은 **stale**로 판단해 다음 verify/complete/resume 때 자동 해제하고
   `verification_lock_cleared` 이벤트를 남깁니다. 시작 시각이 없는 0.4 잠금은 검사 timeout(모르면
   3600초)+60초가 지나면 stale입니다. 검사 프로세스 그룹은 리더를 회수하기 전에 종료합니다.
 - verify가 도는 중 run이 pause/cancel되면 그 결과는 증거로 채택되지 않습니다.
-- **최종 검사**(`--check` 없음): 어떤 미완료 run에도 활성 워커나 쓰기 claim이 없어야 합니다.
+- **최종 검사**(`--check` 없음): 같은 워크트리의 어떤 미완료 run에도 활성 워커나 쓰기 claim이 없어야 합니다.
 - **task 검사**(`--check ID`): **이 run**이 쓰기 claim을 갖고 있지 않으면 됩니다. 다른 run의 작성자나
   읽기 전용 워커가 활동 중이어도 실행되며, 동시 코드 변경은 전후 fingerprint로 실패 처리됩니다.
 
@@ -167,7 +202,7 @@ DB/훅 장애 시 Codex는 도구를 계속 실행합니다. `--yolo`는 하네�
 ```bash
 als sync-usage --run RUN_ID
 als report --run RUN_ID --format md     # JSON은 schema_version 2
-als usage --latest
+als usage --latest                      # 선택 옵션이 없으면 als usage가 --latest를 붙임
 ```
 
 등록된 root/child 세션 로그만 증분으로 읽습니다(기본 `$CODEX_HOME/sessions`, run에 기록된 세션
@@ -185,7 +220,7 @@ als usage --latest
 |---|---|
 | `install.sh` / `als install --check` | 0 정상, 1 미설치, 2 변경·거부, 4 구버전 |
 | `install.sh` / `als install` (그 외) | 0 성공, 2 거부(사전 점검 실패·수정된 관리 파일 등) |
-| `als doctor` / `harness.py doctor` | 필수 의존성이 없으면 1(필수 항목 `FAIL`), 선택 항목과 훅 미설치는 `warn`만(0) |
+| `als doctor` / `harness.py doctor` | 0 필수 항목 정상(선택 항목·훅 미설치·0.5 미만 프로젝트 설치는 경고만), 1 필수 의존성 실패(`FAIL`), 2 사용법·상태 오류 |
 | `token_usage.py` / `als usage` | 0 정상, 1 해당 세션 없음, 2 인자·세션 디렉터리 오류, 3 `--strict`에서 경고 |
 | `check-runtime.py` | 0 정상, 2 문제 발견 |
 
@@ -199,7 +234,7 @@ als usage --latest
 | `git` | 없음/2.5 미만. 포크된 워커의 `git worktree`와 훅의 저장소 탐색에 필요 |
 | `sqlite3` | Python에 sqlite3 모듈 없음. 전체 Python 빌드를 설치 |
 | `codex` | `npm i -g @openai/codex` 후 PATH 확인 |
-| `codex-feature:hooks` / `codex-feature:multi_agent` | `codex features enable hooks` / `codex features enable multi_agent` (`--no-probe`면 생략) |
+| `codex-feature:hooks` / `codex-feature:multi_agent` | `codex features enable hooks` / `codex features enable multi_agent` (`--no-probe`면 생략). `codex features list`를 실행할 수 없으면 알 수 없음(`ok: null`, `[unk ]`)으로 표시하고 doctor를 실패시키지 않으니 직접 확인하세요. 시간 초과면 `codex did not answer within Ns; raise ALS_DEPS_TIMEOUT` |
 | `ocx` (선택) | `run.sh --configure-ocx`에만 필요 |
 | `als-on-path` (선택) | `export PATH="$HOME/.local/bin:$PATH"`를 셸 프로필에 추가 |
 | `conflict:agent-roles` (선택) | 프로젝트 `.codex/agents/als_*.toml`이 전역 역할을 가림. `als uninstall` 또는 `als uninstall --global`로 하나만 유지 |
@@ -208,7 +243,12 @@ als usage --latest
 하네스 부분은 범위(project/global), 상태 DB 경로, 훅 파일 구성 여부와 관측된 이벤트를 보여줍니다.
 두 범위 모두 `PROJECT/.codex/hooks.json`(프로젝트·`--hooks-only` 설치)을 먼저, 이어서
 `$CODEX_HOME/hooks.json`(전역 설치)을 확인하고 훅을 찾은 파일을 표시합니다(`hooks_found_in`).
-`--no-probe`는 의존성 점검에서 외부 프로브를 생략합니다.
+`--no-probe`는 `codex features list`만 생략합니다(`codex-feature:*` 항목 없음). `git --version`,
+`codex --version`, `ocx --version`은 계속 실행하며 각각 `ALS_DEPS_TIMEOUT`초(기본 10)로 제한됩니다.
+`als doctor --json`은 `{"deps": ..., "harness": ...}` 객체 하나를 출력합니다. `harness`는 저장소 밖이면
+`null`, 0.5 미만 프로젝트 설치면 `{"outdated_project_install": VERSION, "message": ...}`이며, 그 경우
+그 하네스는 실행하지 않고 ``project install X is outdated: run `als install` (upgrade) or `als uninstall` ``을
+안내합니다. 하네스가 `--no-deps`를 지원하면 `als`가 넘겨 의존성 출력이 한 번만 나옵니다.
 configured(설정 존재), observed(콜백 도착), trust(사용자 신뢰), blocking(차단 실효성)은 서로 다르며,
 콜백을 봤다고 서빙 모델이나 보안 경계가 검증된 것은 아닙니다.
 
