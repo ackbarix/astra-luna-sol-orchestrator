@@ -10,6 +10,8 @@ CHECK_FIELDS = ('id', 'status', 'exit_code', 'timed_out', 'snapshot', 'stamp', '
 def report(engine, rid):
     r = engine.s.run(rid)
     tasks = engine.s.tasks(rid)
+    budget = engine.budget(r)
+    budget['usage_synced_at'] = r.get('last_usage_sync')  # staleness of confirmed_tokens
     usage = {}
     for row in engine.s.db.execute('SELECT thread,doc FROM usage WHERE run=?', (rid,)):
         e = json.loads(row['doc'])
@@ -25,7 +27,7 @@ def report(engine, rid):
             'workers': [{k: t.get(k) for k in WORKER_FIELDS} for t in tasks],
             'checks': [{k: e.get(k) for k in CHECK_FIELDS} for e in r['evidence'].values()],
             'assessment_ids': list(r['assessments']), 'assessments_are_self_reported': True,
-            'budget': engine.budget(r), 'usage_by_thread_model_effort': list(usage.values()),
+            'budget': budget, 'usage_by_thread_model_effort': list(usage.values()),
             'efficiency': r['plan'].get('efficiency'), 'measurement': r.get('measurement'),
             'closed_at': r.get('closed_at'), 'purpose': r['plan'].get('purpose', 'legacy'),
             'usage_scope': 'root run window and linked child records; not billing',

@@ -20,59 +20,135 @@ def normalizer():
     return NORMALIZER
 
 
-def sync_path(store, run, path):
-    """Only registered, readable rollouts under CODEX_HOME/sessions. 1 MiB/tick."""
-    base = Path(os.environ.get('CODEX_HOME', '~/.codex')).expanduser() / 'sessions'
+MAX_LINE = 1024 * 1024
+TICK_BYTES = 1024 * 1024
+PRE_TOOL_SYNC_BYTES = 256 * 1024  # PreToolUse runs on every spawn; keep it cheap
+HEAD_BYTES = 4096
+SKIP_CHUNK = 64 * 1024
+
+
+def sessions_base():
+    """Resolved CODEX_HOME/sessions for this process; recorded at registration time."""
+    return (Path(os.environ.get('CODEX_HOME') or '~/.codex').expanduser() / 'sessions').resolve()
+
+
+def known_threads(store, run):
+    threads = {run.get('session')} | {a.get('thread_id') for t in store.tasks(run['id']) for a in t['attempts']}
+    threads.discard(None)
+    return threads
+
+
+def lineage(data):
+    """Only thread identity from session_meta; never instructions, cwd or git payloads."""
+    parent = data.get('parent_thread_id')
+    source = data.get('source')
+    sub = source.get('subagent') if isinstance(source, dict) else None
+    spawn = sub.get('thread_spawn') if isinstance(sub, dict) else None
+    if not parent and isinstance(spawn, dict):
+        parent = spawn.get('parent_thread_id')
+    thread = data.get('id')
+    return {'id': thread if isinstance(thread, str) else None,
+            'parent_thread_id': parent if isinstance(parent, str) else None}
+
+
+def head_digest(f):
+    """Digest of the first line (capped at 4 KiB) so truncate-and-regrow is detected."""
+    f.seek(0)
+    head = f.read(HEAD_BYTES)
+    cut = head.find(b'\n')
+    if cut >= 0:
+        return digest(head[:cut + 1])
+    return digest(head) if len(head) == HEAD_BYTES else None
+
+
+def skip_line(f):
+    """Discard through the next newline; returns (bytes skipped, newline found)."""
+    skipped = 0
+    while True:
+        chunk = f.readline(SKIP_CHUNK)
+        if not chunk:
+            return skipped, False
+        skipped += len(chunk)
+        if chunk.endswith(b'\n'):
+            return skipped, True
+
+
+def checked_rollout(path, base=None):
+    base = Path(base).resolve() if base else sessions_base()
     p = Path(path).expanduser()
-    base = base.resolve()
     if not p.is_absolute() or base not in p.resolve().parents or p.is_symlink() or p.suffix != '.jsonl':
-        raise HarnessError('Usage path must be a JSONL rollout beneath CODEX_HOME/sessions')
+        raise HarnessError('Usage path must be a JSONL rollout beneath the registered CODEX_HOME/sessions')
     if any(x.is_symlink() for x in p.parents if x != base and base in x.parents):
         raise HarnessError('Symlinked rollout parent')
+    return p
+
+
+def sync_path(store, run, path, base=None, limit=TICK_BYTES):
+    """Only registered, readable rollouts under CODEX_HOME/sessions; at most `limit` bytes per tick.
+
+    `base` is the sessions directory recorded when the transcript was registered;
+    the current process environment is only a fallback for legacy registrations.
+    """
+    p = checked_rollout(path, base)
     cursor_key = str(p) + '#als-run=' + run['id']
-    stat = p.stat()
     old = store.get('cursors', cursor_key, 'path') or {}
-    key = [stat.st_dev, stat.st_ino]
-    if old.get('file_key') != key or stat.st_size < old.get('offset', 0):
-        cursor = {'file_key': key, 'offset': 0, 'context': {}, 'contexts': {}, 'meta': None}
-    else:
-        cursor = old
-    offset = cursor['offset']
     consumed = 0
     events = []
     notes = []
-    known = {run.get('session')} | {a.get('thread_id') for t in store.tasks(run['id']) for a in t['attempts']}
+    known = known_threads(store, run)
     if run.get('status') in {'completed', 'cancelled'} and not run.get('closed_at'):
         notes.append('legacy run has no terminal timestamp; post-run usage boundary unverified')
     with p.open('rb') as f:
-        f.seek(offset)
-        while consumed < 1024 * 1024:
-            raw = f.readline(1024 * 1024 + 1)
+        stat = os.fstat(f.fileno())
+        key = [stat.st_dev, stat.st_ino, head_digest(f)]
+        if old.get('file_key') != key or stat.st_size < old.get('offset', 0):
+            cursor = {'file_key': key, 'offset': 0, 'context': {}, 'contexts': {}, 'meta': None}
+        else:
+            cursor = old
+        f.seek(cursor['offset'])
+        if cursor.get('skipping'):
+            skipped, found = skip_line(f)
+            consumed += skipped
+            cursor['offset'] = f.tell()
+            if found:
+                cursor.pop('skipping')
+        while consumed < limit and not cursor.get('skipping'):
+            raw = f.readline(MAX_LINE + 1)
             if not raw:
                 break
-            if len(raw) > 1024 * 1024:
-                notes.append('oversized rollout line; cursor not advanced')
-                break
+            if len(raw) > MAX_LINE:
+                notes.append('oversized rollout line skipped')
+                skipped, found = (0, True) if raw.endswith(b'\n') else skip_line(f)
+                consumed += len(raw) + skipped
+                cursor['offset'] = f.tell()
+                if not found:
+                    cursor['skipping'] = True
+                continue
             if not raw.endswith(b'\n'):
                 break
-            cursor['offset'] = f.tell()
-            consumed += len(raw)
             try:
                 o = json.loads(raw)
             except (ValueError, UnicodeError):
+                o = None
                 notes.append('malformed rollout line')
+            data = o.get('payload') if isinstance(o, dict) else None
+            kind = o.get('type') if isinstance(o, dict) else None
+            thread = (cursor.get('meta') or {}).get('id')
+            if isinstance(data, dict) and kind != 'session_meta' and thread and thread not in known:
+                known = known_threads(store, run)
+                if thread not in known:
+                    # Leave the cursor here: a later bind/resume --session can ingest it.
+                    notes.append('unbound thread; usage pending until the thread is bound')
+                    break
+            cursor['offset'] = f.tell()
+            consumed += len(raw)
+            if not isinstance(data, dict):
                 continue
-            if not isinstance(o, dict) or not isinstance(o.get('payload'), dict):
-                continue
-            data = o['payload']
-            kind = o.get('type')
             if kind == 'session_meta':
-                cursor['meta'] = data
+                cursor['meta'] = lineage(data)
                 continue
-            meta = cursor.get('meta') or {}
-            thread = meta.get('id')
-            if thread not in known or not thread:
-                notes.append('unbound thread; usage excluded')
+            if not thread:
+                notes.append('rollout record before session_meta; usage excluded')
                 continue
             if kind == 'turn_context':
                 context = {'model': data.get('model', 'unknown'),
@@ -134,19 +210,32 @@ def sync_path(store, run, path):
     return {'bytes_read': consumed, 'response_records_seen': len(events), 'warnings': sorted(set(notes))}
 
 
-def sync(engine, rid):
-    r = engine.s.run(rid)
-    session = engine.s.get('sessions', r.get('session')) or {}
-    paths = set(session.get('transcripts', []))
-    for t in engine.s.tasks(rid):
+def registered_sources(store, run):
+    """(path, sessions base recorded at registration or None for legacy rows)."""
+    session = (store.get('sessions', run['session']) if run.get('session') else None) or {}
+    bases = session.get('transcript_bases') or {}
+    sources = {p: bases.get(p) for p in session.get('transcripts', [])}
+    for t in store.tasks(run['id']):
         for a in t['attempts']:
-            w = engine.s.get('workers', a.get('thread_id')) or {}
+            w = (store.get('workers', a['thread_id']) if a.get('thread_id') else None) or {}
             if w.get('transcript'):
-                paths.add(w['transcript'])
+                sources[w['transcript']] = w.get('transcript_base')
+    return sources
+
+
+def sync(engine, rid, limit=None):
+    """Incremental sync of every registered rollout. `limit` caps total bytes for this call."""
+    r = engine.s.run(rid)
+    remaining = limit
     results = []
-    for p in paths:
+    for p, base in sorted(registered_sources(engine.s, r).items()):
+        if remaining is not None and remaining <= 0:
+            break
         try:
-            results.append(sync_path(engine.s, r, p))
+            result = sync_path(engine.s, r, p, base, TICK_BYTES if remaining is None else remaining)
+            results.append(result)
+            if remaining is not None:
+                remaining -= result['bytes_read']
         except (OSError, HarnessError) as ex:
             results.append({'warning': str(ex)})
             with engine.s.tx():

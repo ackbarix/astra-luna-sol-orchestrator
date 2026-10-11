@@ -305,7 +305,9 @@ def dispatch(args, store):
     elif args.cmd == 'resume':
         out = e.resume(args.run, args.accept_drift, args.workers_stopped, args.session)
     elif args.cmd == 'sync-usage':
-        out = {'results': usage.sync(e, args.run), 'budget': e.budget(store.run(args.run))}
+        results = usage.sync(e, args.run)
+        run = store.run(args.run)
+        out = {'results': results, 'budget': dict(e.budget(run), usage_synced_at=run.get('last_usage_sync'))}
     elif args.cmd == 'report':
         out = report.report(e, args.run)
         if args.format == 'md':

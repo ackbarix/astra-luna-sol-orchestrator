@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 from .common import HarnessError, digest, ident, now
 from .engine import Engine
+from . import usage
 
 EVENTS = {'SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd', 'Interrupt'}
 
@@ -83,6 +84,10 @@ def record_receipt(store, sid, event, payload):
                 receipt['source'] = payload['source'][:40]
             if isinstance(payload.get('transcript_path'), str):
                 receipt['transcripts'] = sorted(set(receipt['transcripts']) | {payload['transcript_path']})[-8:]
+                # Validate later reads against the base Codex used here, not a later process env.
+                bases = dict(receipt.get('transcript_bases') or {})
+                bases.setdefault(payload['transcript_path'], str(usage.sessions_base()))
+                receipt['transcript_bases'] = {k: v for k, v in bases.items() if k in receipt['transcripts']}
         store.session(sid, receipt)
     return receipt
 
@@ -159,7 +164,9 @@ def handle(store, payload):
         fields = {'cwd': str(cwd)}
         if isinstance(payload.get('agent_transcript_path'), str):
             fields['transcript'] = payload['agent_transcript_path']
+            fields['transcript_base'] = str(usage.sessions_base())
         update_worker(store, wid, sid, **fields)
+        usage.sync(engine, rid)
         return {}
     if event == 'PreToolUse' and spawn_name(tool) and agent:
         # Child-origin spawn: never reserve a plan task for it; record the parent.
@@ -189,9 +196,8 @@ def handle(store, payload):
                 return deny('ALS guarded spawn requires an explicit configured agent_type')
             return warn('ALS observe: missing role; routing not verified')
         try:
-            # Incremental reads only from previously registered rollout paths.
-            from .usage import sync
-            sync(engine, rid)
+            # Incremental, byte-bounded reads only from previously registered rollout paths.
+            usage.sync(engine, rid, limit=usage.PRE_TOOL_SYNC_BYTES)
             result = engine.reserve(rid, match.group(1), call_id, role=inp.get('agent_type'), requested=inp)
         except (HarnessError, OSError) as ex:
             return deny(str(ex)) if mode == 'guarded' else warn(str(ex))
@@ -226,8 +232,7 @@ def handle(store, payload):
             return warn('ALS spawn result not correlated. Inspect task status; no automatic retry.')
         return {}
     if event == 'Stop':
-        from .usage import sync
-        sync(engine, rid)
+        usage.sync(engine, rid)
         # Only an explicit completion request can solicit one continuation. A
         # normal answer, blocked task, cancel, or stop_hook_active never loops.
         run = store.run(rid)
