@@ -169,6 +169,35 @@ class RecordedWorktreeValidationTests(Base):
         main = self.e.start(self.checks_only())
         self.assertTrue(verify.verify(self.e, main, execute_commands=True)['passed'])
 
+class MovedWorktreeTests(Base):
+    """A run whose worktree was moved keeps its claims counting everywhere."""
+
+    def move_a(self):
+        moved = self.base / 'wt-a-moved'
+        git('worktree', 'move', str(self.wt_a), str(moved), cwd=self.project)
+        return moved
+
+    def test_moved_run_claims_still_block_the_new_location(self):
+        a = self.e.start(self.plan(), worktree=self.wt_a)
+        self.assertTrue(self.e.reserve(a, 'one', 'ca')['allowed'])
+        moved = self.move_a()
+        b = self.e.start(self.plan(), worktree=moved)
+        out = self.e.reserve(b, 'one', 'cb')
+        self.assertFalse(out['allowed'], out)
+        self.assertTrue(any(r.startswith('resource owned by ' + a) for r in out['reasons']), out)
+
+    def test_moved_run_blocks_final_verify_until_cancelled(self):
+        a = self.e.start(self.plan(), worktree=self.wt_a)
+        self.assertTrue(self.e.reserve(a, 'one', 'ca')['allowed'])
+        moved = self.move_a()
+        c = self.e.start(self.checks_only(), worktree=moved)
+        with self.assertRaises(HarnessError):
+            verify.verify(self.e, c, execute_commands=True)
+        self.e.pause(a, 'worktree moved', cancel=True)
+        self.assertTrue(verify.verify(self.e, c, execute_commands=True)['passed'])
+        b = self.e.start(self.plan(), worktree=moved)
+        self.assertTrue(self.e.reserve(b, 'one', 'cb')['allowed'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -174,9 +174,25 @@ class Engine:
         the verification lock protect files, so they only apply among runs
         whose resolved worktree (Store.run_key) is equal: two linked
         worktrees of one repository never share a file path. `resources`
-        (ports, databases, other external state) stay global."""
+        (ports, databases, other external state) stay global.
+
+        Conservative for moved or removed worktrees: a live run whose
+        recorded worktree no longer validates (e.g. after `git worktree
+        move`) may still have a worker writing in the new location, so it
+        shares with every run until it is cancelled, as before per-worktree
+        scoping. Terminal runs hold nothing and are skipped."""
         key = self.s.run_key(run)
-        return {r['id'] for r in self.s.runs() if self.s.run_key(r) == key}
+        runs = [r for r in self.s.runs() if r['status'] not in TERMINAL or r['id'] == run['id']]
+        if not self._root_valid(run):
+            return {r['id'] for r in runs}
+        return {r['id'] for r in runs if self.s.run_key(r) == key or not self._root_valid(r)}
+
+    def _root_valid(self, run):
+        try:
+            self.s.checked_run_root(run)
+        except HarnessError:
+            return False
+        return True
 
     def snapshot(self, rid):
         return capture(self.root(self.s.run(rid)))
