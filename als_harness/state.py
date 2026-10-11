@@ -21,6 +21,14 @@ CREATE INDEX IF NOT EXISTS events_by_run ON events(run,stamp);
 PRAGMA user_version=1;
 '''
 
+def locate(project: Path) -> Path:
+    """Path of the state database for a project, without creating anything.
+
+    Contract (0.5): every caller that needs to know whether state exists or
+    where evidence lives must use this instead of hardcoding paths.
+    """
+    return project.resolve() / '.astra-luna-sol/state/runs.sqlite'
+
 class Store:
     def __init__(self, project: Path):
         self.project = project.resolve(strict=True)

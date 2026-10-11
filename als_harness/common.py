@@ -23,6 +23,15 @@ ROLES = {
 ACTIVE = {'reserved', 'running', 'uncertain'}
 TERMINAL = {'completed', 'cancelled'}
 
+def counted_tokens(usage):
+    """Budget/estimate unit: uncached input plus output.
+
+    Cached input is part of input_tokens but is billed and rate-limited very
+    differently; counting it fully exhausts soft budgets on long sessions.
+    """
+    cached = usage.get('cached_input_tokens') or 0
+    return max(0, usage['input_tokens'] - cached) + usage['output_tokens']
+
 def encoded(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
 

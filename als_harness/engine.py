@@ -196,7 +196,8 @@ class Engine:
             if len(tasks)!=1: raise HarnessError('Cannot correlate spawn response to one task')
             t=tasks[0]; a=t['attempts'][-1]
             if a['thread_id'] not in (None,thread): raise HarnessError('Conflicting thread identity')
-            if a['status'] not in ('reserved','running'): return
+            if a['status'] not in ('reserved','running'):
+                return {'bound':False,'reason':'attempt already '+a['status']}
             # Lifecycle Stop can arrive before the tool response; never undo it.
             w=self.s.get('workers',thread) or {}
             a['thread_id']=thread
@@ -204,6 +205,7 @@ class Engine:
             a['status']='awaiting_validation' if ended else 'running'
             t['status']=a['status']; a['ended']=ended
             self.s.save_task(t)
+            return {'bound':True,'reason':None}
 
     def worker_stopped(self, sid, thread, role):
         with self.s.tx():
