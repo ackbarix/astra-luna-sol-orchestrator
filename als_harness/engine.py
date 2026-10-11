@@ -370,7 +370,7 @@ class Engine:
         if not evidence or evidence['status'] != 'passed' or evidence['snapshot'] != snap:
             return False
         try:
-            path = checked_path(self.s.project, evidence['log_path'])
+            path = self.s.evidence_path(evidence['log_path'])
             return digest(path.read_bytes()) == evidence['log_sha256']
         except (OSError, HarnessError, KeyError):
             return False

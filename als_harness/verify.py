@@ -77,7 +77,7 @@ def verify(engine, rid, check_id=None, execute_commands=False):
         s.save_run(run)
     results = []
     try:
-        private_dir(s.project, '.astra-luna-sol/evidence/' + rid)
+        folder = s.evidence_dir(rid)
         for check in checks:
             record = {'id': check['id'], 'argv': check['argv'], 'cwd': str(s.project), 'stamp': now(),
                       'snapshot': before['digest']}
@@ -91,11 +91,11 @@ def verify(engine, rid, check_id=None, execute_commands=False):
             record['status'] = 'passed' if outcome['exit_code'] == 0 and not outcome['timed_out'] and unchanged else 'failed'
             record['code_changed_during_check'] = not unchanged
             filename = check['id'] + '-' + ticket + '.log'
-            path = checked_path(s.project, '.astra-luna-sol/evidence/' + rid + '/' + filename)
+            path = checked_path(folder, filename)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
             with os.fdopen(fd, 'w', encoding='utf-8') as handle:
                 handle.write(outcome['log'])
-            record['log_path'] = str(path.relative_to(s.project))
+            record['log_path'] = s.evidence_record_path(path)
             record['log_sha256'] = digest(outcome['log'].encode())
             with s.tx():
                 run = s.run(rid)
