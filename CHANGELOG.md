@@ -83,6 +83,28 @@
 - Child agents may not spawn agents (denied in guarded mode).
 - Hook PreToolUse/PostToolUse groups now match only `spawn_agent`.
 
+### Round-3 runtime fixes
+- Runs started inside a linked `git worktree` record `run.worktree`; snapshots, `verify`
+  (cwd) and evidence freshness use it, state stays keyed by the main project, and hook events
+  from any worktree of the same repository are handled.
+- HEAD rollout cursors start at the last complete line at `start`, `resume --session` and
+  SessionStart of a session with a run; the per-call sync budget rotates least-recently-synced
+  first.
+- `start` without `--session` picks a session only when exactly one had any hook event in
+  the last 10 minutes, always warns with its id, and never auto-picks in guarded mode.
+- `doctor` reads the project `.codex/hooks.json` then `$CODEX_HOME/hooks.json` in both scopes,
+  prints optional items as `warn`, exits 1 only when a required dependency fails, and accepts
+  `--no-probe`.
+- State DB uses WAL with 5 s (CLI) / 2 s (hooks) busy timeouts; a relative `ALS_STATE_HOME` is
+  an error and a relative `XDG_STATE_HOME` is ignored.
+- `verify` kills the check group before reaping its leader; 0.4 locks without a process start
+  time expire after the check timeout (or 3600 s) + 60 s.
+- Calibration treats failed/cancelled/interrupted attempts alike and samples only completed
+  tasks; `spawn_name` no longer accepts `Agent`; unprepared drafts get a `prepare` hint.
+- `token_usage.py --day` without `--cwd` is incomplete when a rollout cannot be attributed;
+  the missing sessions directory error names the path. `check-runtime.py` works from a global
+  install (`smoke-test.txt` beside the script, `$CODEX_HOME/als.config.toml` and `agents/`).
+
 ### Not validated
 - No paid model or live Codex session was run for this release. Tests use synthetic logs,
   temporary Git projects and local commands; no performance or savings claim is made.
