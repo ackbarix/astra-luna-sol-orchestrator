@@ -14,6 +14,7 @@ from als_harness.engine import Engine, validate_plan
 from als_harness.common import HarnessError, encoded
 from als_harness.state import Store
 
+
 ROOT=Path(__file__).resolve().parents[1]
 
 def task(tid='scan', **kwargs):
@@ -45,10 +46,10 @@ class RoutingTests(unittest.TestCase):
     def test_role_conflict_needs_reason(self):
         with self.assertRaises(HarnessError):f.prepare(draft([task(role='als_worker')]))
     def test_explicit_role_reason(self):
-        t=task(role='als_hard_worker',role_override_reason='Harder than initial classification')
+        t=task(kind='implementation',role='als_hard_worker',role_override_reason='Harder than initial classification')
         self.assertEqual(f.prepare(draft([t]))['tasks'][0]['role'],'als_hard_worker')
     def test_high_risk_never_silently_downshift(self):
-        with self.assertRaises(HarnessError):f.prepare(draft([task(risk='high',role='als_explorer',role_override_reason='cheap')]))
+        with self.assertRaises(HarnessError):f.prepare(draft([task(kind='implementation',risk='high',role='als_explorer',role_override_reason='cheap')]))
     def test_invalid_enum(self):
         for key in ('kind','complexity','risk'):
             with self.assertRaises(HarnessError):f.prepare(draft([task(**{key:'invented'})]))
@@ -151,7 +152,7 @@ class EnginePolicyTests(EngineFixture, unittest.TestCase):
     def test_actual_usage_deducted_from_outstanding_estimate(self):
         r=self.start(draft([task(estimate_tokens=100)]));self.e.reserve(r,'scan','c');self.e.bind(r,'c','kid')
         self.event(r,'kid',n=70,model='gpt-6-luna',effort='medium')
-        self.assertEqual(self.e.budget(self.s.run(r))['reserved_estimate'],20)
+        self.assertEqual(self.e.budget(self.s.run(r))['reserved_estimate'],70)  # 100 - counted(70-50+10)
     def test_terminal_clock_frozen(self):
         r=self.start(draft([]));verify.verify(self.e,r,execute_commands=True);self.e.complete(r)
         before=self.e.budget(self.s.run(r))['elapsed_wall_seconds']
@@ -207,7 +208,7 @@ class HistoryTests(EngineFixture, unittest.TestCase):
         self.assertFalse(a.history(self.s,'bounded-fix')['eligible'])
         self.sample(4)
         h=a.history(self.s,'bounded-fix');self.assertTrue(h['eligible']);self.assertTrue(h['estimates'])
-        self.assertEqual(next(iter(h['estimates'].values()))['suggested_tokens'],138)
+        self.assertEqual(next(iter(h['estimates'].values()))['suggested_tokens'],75)
     def test_smoke_tests_excluded(self):
         for i in range(5):self.sample(i,purpose='diagnostic')
         self.assertEqual(a.history(self.s,'bounded-fix')['reviewed_runs'],0)

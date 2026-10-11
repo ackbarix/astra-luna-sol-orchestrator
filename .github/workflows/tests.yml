@@ -5,22 +5,141 @@ on:
 permissions:
   contents: read
 jobs:
-  install-harness-and-report:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  unit:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.11', '3.13']
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the 0.4 -> 0.5 upgrade test installs 15ff2b1 from history
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests (temporary HOME/CODEX_HOME/XDG dirs)
+        run: |
+          sandbox=$(mktemp -d)
+          HOME="$sandbox/home" CODEX_HOME="$sandbox/home/.codex" \
+          XDG_DATA_HOME="$sandbox/home/.local/share" XDG_STATE_HOME="$sandbox/home/.local/state" \
+            python3 -m unittest discover -s tests -v
+      - run: python3 -m py_compile install.py config_overlay.py scripts/token_usage.py scripts/check-runtime.py scripts/harness.py als_harness/*.py
+      - name: POSIX sh scripts parse with sh (and dash where available)
+        run: |
+          for script in install.sh setup.sh bin/als; do
+            sh -n "$script"
+            if command -v dash >/dev/null 2>&1; then dash -n "$script"; fi
+          done
+      - name: Bash scripts parse
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
+
+  runtime-py39:
+    # Runtime floor: harness modules must import and pass on Python 3.9.
+    # Installer/tomllib tests skip themselves when neither tomllib nor tomli exists.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
-      - run: python3 -m unittest discover -s tests -v
-      - run: python3 -m py_compile install.py config_overlay.py scripts/token_usage.py scripts/check-runtime.py scripts/harness.py als_harness/*.py
-      - name: Check each shell script (not just the first positional argument)
+          python-version: '3.9'
+      - name: Runtime tests on 3.9 (installer tests skip without tomli)
         run: |
-          for script in install.sh setup.sh scripts/*.sh; do
-            bash -n "$script"
-          done
+          sandbox=$(mktemp -d)
+          HOME="$sandbox/home" CODEX_HOME="$sandbox/home/.codex" XDG_DATA_HOME="$sandbox/home/.local/share" \
+            python3 -m unittest discover -s tests -v
+      - name: setup.sh on 3.9 (ALS_PYTHON=python, no tomllib), then als doctor --json with a fake codex
+        run: |
+          sandbox=$(mktemp -d)
+          mkdir -p "$sandbox/home" "$sandbox/fakebin"
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in --version) echo codex-cli 0.0.0-fake ;;' \
+            ' features) printf "hooks stable true\nmulti_agent stable true\n" ;;' \
+            ' *) echo "fake codex $*" ;; esac' > "$sandbox/fakebin/codex"
+          chmod +x "$sandbox/fakebin/codex"
+          export HOME="$sandbox/home" CODEX_HOME="$sandbox/home/.codex" \
+            XDG_DATA_HOME="$sandbox/home/.local/share" XDG_STATE_HOME="$sandbox/home/.local/state" \
+            ALS_BIN_DIR="$sandbox/home/.local/bin" ALS_PYTHON=python PATH="$sandbox/fakebin:$PATH"
+          python --version
+          python -c 'import sys; assert sys.version_info[:2] == (3, 9), sys.version'
+          sh setup.sh
+          project="$sandbox/project"
+          mkdir "$project" && git init -q "$project"
+          cd "$project"
+          "$ALS_BIN_DIR/als" install --hooks-only
+          # Exit status reflects required checks; the JSON must parse either way.
+          rc=0; "$ALS_BIN_DIR/als" doctor --no-probe --json > "$sandbox/doctor.json" || rc=$?
+          echo "als doctor exit status: $rc"
+          python -c 'import json, sys; d = json.load(open(sys.argv[1])); assert set(d) == {"deps", "harness"}, d' \
+            "$sandbox/doctor.json"
+          "$ALS_BIN_DIR/als" uninstall --hooks-only
+          "$ALS_BIN_DIR/als" uninstall --global
+
+  end-to-end:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Sandbox environment and fake codex
+        run: |
+          sandbox=$(mktemp -d)
+          mkdir -p "$sandbox/home" "$sandbox/fakebin"
+          printf '%s\n' '#!/bin/sh' \
+            'case "$1" in --version) echo codex-cli 0.0.0-fake ;;' \
+            ' features) printf "hooks stable true\nmulti_agent stable true\n" ;;' \
+            ' *) echo "fake codex $*" ;; esac' > "$sandbox/fakebin/codex"
+          chmod +x "$sandbox/fakebin/codex"
+          {
+            echo "SANDBOX=$sandbox"
+            echo "HOME=$sandbox/home"
+            echo "CODEX_HOME=$sandbox/home/.codex"
+            echo "XDG_DATA_HOME=$sandbox/home/.local/share"
+            echo "XDG_STATE_HOME=$sandbox/home/.local/state"
+          } >> "$GITHUB_ENV"
+          echo "$sandbox/fakebin" >> "$GITHUB_PATH"
+      - name: Project install, check, uninstall
+        run: |
+          project="$SANDBOX/project"
+          mkdir "$project" && git init -q "$project"
+          sh install.sh "$project" --dry-run
+          sh install.sh "$project"
+          sh install.sh "$project" --check
+          sh install.sh "$project" --uninstall
+          test -z "$(ls -A "$project" | grep -v '^.git$')"
+      - name: Global install, hooks-only, check, uninstall
+        run: |
+          project="$SANDBOX/project2"
+          mkdir "$project" && git init -q "$project"
+          sh install.sh --global
+          sh install.sh --global --check
+          sh install.sh "$project" --hooks-only
+          sh install.sh "$project" --hooks-only --check
+          sh install.sh "$project" --hooks-only --uninstall
+          sh install.sh --global --uninstall
+          test ! -e "$CODEX_HOME/als.config.toml"
+      - name: setup.sh bootstrap, then als doctor with a fake codex
+        run: |
+          sh setup.sh
+          export PATH="$HOME/.local/bin:$PATH"
+          project="$SANDBOX/project3"
+          mkdir "$project" && git init -q "$project"
+          cd "$project"
+          als doctor
+          als install --hooks-only
+          als status
+          als version
+          als uninstall --hooks-only
+          als uninstall --global

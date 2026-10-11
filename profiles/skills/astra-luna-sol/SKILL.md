@@ -27,8 +27,10 @@ role requires an explained override; prose does not change runtime model setting
 
 ## Managed work
 
-Read `.astra-luna-sol/efficiency-guide.md` for the plan schema only when needed.
-CLI: `python3 .astra-luna-sol/harness.py` (below abbreviated HARNESS).
+Read `efficiency-guide.md` for the plan schema only when needed (project install:
+`.astra-luna-sol/`; global install: `${ALS_HOME:-~/.local/share/als}/`).
+CLI (below abbreviated HARNESS): `python3 .astra-luna-sol/harness.py` in a project
+install, or `als <command>` after a global install (`als plan new FILE` drafts a plan).
 
 1. Draft goal, checks/criteria and tasks with objective, kind, complexity, risk,
    acceptance, relevant context_files, write_paths/resources/dependencies. No raw

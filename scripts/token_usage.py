@@ -3,6 +3,9 @@
 # Copyright 2026 contributors. Apache-2.0: see licenses/Apache-2.0.txt.
 # ALS 0.2: per-response model/effort attribution; cross-day lineage;
 # explicit uncertainty for legacy counters; separate session/day selection.
+# ALS 0.5: per-lineage warnings (unrelated files never mark a selected report
+# incomplete), robust identity coercion, day-relevant threads, --cwd subtrees,
+# opt-in archived sessions.
 """Read-only Codex usage report. Not a bill, benchmark or upstream routing proof."""
 from __future__ import annotations
 import argparse
@@ -12,12 +15,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
 UTC = timezone.utc
 MAX_LINE = 8 * 1024 * 1024
+# Index warnings for rollout files that could not be attributed to any session.
+UNATTRIBUTED_PREFIXES = ("missing_session_meta:", "missing_thread_id:", "unreadable_file:", "unreadable_line:",
+                         "oversized_line:", "non_object_record:", "symlink_skipped:")
 
 
 def empty_usage():
@@ -29,12 +36,23 @@ def add_usage(target, usage):
         target[key] += usage[key]
 
 
+FRACTION = re.compile(r"\.(\d+)(?=[+-]\d\d:\d\d$|$)")
+
+
 def parse_ts(value):
-    try:
-        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return result.astimezone(UTC) if result.tzinfo else None
-    except (ValueError, AttributeError, TypeError):
+    """Aware UTC datetime or None. Python 3.9/3.10 fromisoformat rejects a "Z"
+    suffix and fractions other than 3 or 6 digits, so normalize both first."""
+    if not isinstance(value, str):
         return None
+    text = value.strip()
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    text = FRACTION.sub(lambda m: "." + (m.group(1) + "000000")[:6], text, count=1)
+    try:
+        result = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return result.astimezone(UTC) if result.tzinfo else None
 
 
 def iso(value):
@@ -50,7 +68,9 @@ def thread_role(meta):
         if isinstance(sub, dict):
             spawn = sub.get("thread_spawn")
             if isinstance(spawn, dict):
-                return spawn.get("agent_role") or "subagent", spawn.get("agent_nickname") or ""
+                role, nickname = spawn.get("agent_role"), spawn.get("agent_nickname")
+                return (role if isinstance(role, str) and role else "subagent",
+                        nickname if isinstance(nickname, str) else "")
             if sub.get("other"):
                 return str(sub["other"]), ""
     if meta.get("thread_source"):
@@ -93,38 +113,53 @@ def objects(path, warnings):
         warnings.append(f"unreadable_file:{path.name}")
 
 
-def index_sessions(directory, warnings):
-    """Scan metadata first. Date NEVER prunes lineage by storage folder."""
-    nodes = {}
-    for path in sorted(directory.rglob("rollout-*.jsonl")):
-        if path.is_symlink():
-            warnings.append(f"symlink_skipped:{path.name}")
-            continue
-        iterator = objects(path, warnings)
-        first = next(iterator, None)
-        iterator.close()
-        if not first or first.get("type") != "session_meta" or not isinstance(first.get("payload"), dict):
-            warnings.append(f"missing_session_meta:{path.name}")
-            continue
-        meta = first["payload"]
-        ident = meta.get("id")
-        if not isinstance(ident, str) or not ident:
-            warnings.append(f"missing_thread_id:{path.name}")
-            continue
-        node = nodes.setdefault(ident, {"meta": meta, "paths": []})
-        node["paths"].append(path)
-        if node["meta"].get("session_id") != meta.get("session_id"):
-            warnings.append(f"conflicting_lineage:{ident}")
+def text_id(value):
+    return value if isinstance(value, str) and value else None
+
+
+def index_sessions(directories, warnings):
+    """Scan metadata first. Date NEVER prunes lineage by storage folder.
+
+    Returns ``(groups, lineage_warnings)``. Warnings that belong to a thread or
+    lineage are keyed by lineage root; only files that cannot be attributed to
+    any thread go to ``warnings`` (index diagnostics, not selected evidence).
+    """
+    if isinstance(directories, Path):
+        directories = [directories]
+    nodes, node_warnings = {}, defaultdict(list)
+    for directory in directories:
+        for path in sorted(directory.rglob("rollout-*.jsonl")):
+            if path.is_symlink():
+                warnings.append(f"symlink_skipped:{path.name}")
+                continue
+            local = []
+            iterator = objects(path, local)
+            first = next(iterator, None)
+            iterator.close()
+            if not first or first.get("type") != "session_meta" or not isinstance(first.get("payload"), dict):
+                warnings.extend(local)
+                warnings.append(f"missing_session_meta:{path.name}")
+                continue
+            meta = first["payload"]
+            ident = text_id(meta.get("id"))
+            if not ident:
+                warnings.append(f"missing_thread_id:{path.name}")
+                continue
+            # First-line warnings are re-reported by analyze_node for selected threads.
+            node = nodes.setdefault(ident, {"meta": meta, "paths": []})
+            node["paths"].append(path)
+            if node["meta"].get("session_id") != meta.get("session_id"):
+                node_warnings[ident].append(f"conflicting_lineage:{ident}")
     def parent(meta):
         source = meta.get("source")
         sub = source.get("subagent", {}) if isinstance(source, dict) else {}
         spawn = sub.get("thread_spawn", {}) if isinstance(sub, dict) else {}
-        return meta.get("parent_thread_id") or (spawn.get("parent_thread_id") if isinstance(spawn, dict) else None)
-    def root_for(ident):
+        return text_id(meta.get("parent_thread_id")) or (text_id(spawn.get("parent_thread_id")) if isinstance(spawn, dict) else None)
+    def root_for(ident, notes):
         visited = set()
         while ident in nodes:
             if ident in visited:
-                warnings.append(f"cyclic_lineage:{ident}")
+                notes.append(f"cyclic_lineage:{ident}")
                 return ident
             visited.add(ident)
             meta = nodes[ident]["meta"]
@@ -134,10 +169,34 @@ def index_sessions(directory, warnings):
                 return ident
             ident = next_id
         return ident
-    groups = defaultdict(list)
+    groups, lineage_warnings = defaultdict(list), defaultdict(list)
     for ident, node in nodes.items():
-        groups[root_for(ident)].append(node)
-    return dict(groups)
+        notes = list(node_warnings[ident])
+        root = root_for(ident, notes)
+        groups[root].append(node)
+        lineage_warnings[root].extend(notes)
+    for root in groups:
+        if root not in nodes:
+            lineage_warnings[root].append("missing_root_metadata:" + root)
+    return dict(groups), {root: sorted(set(lineage_warnings[root])) for root in groups}
+
+
+def identity_value(value, warnings, tag):
+    """Recorded identity text; malformed values become "unknown" with a warning."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        return value
+    warnings.append(tag)
+    return "unknown"
+
+
+def first_value(payload, *keys):
+    for key in keys:
+        value = payload.get(key)
+        if value is not None and value != "":
+            return value
+    return None
 
 
 def normalized_usage(raw, warnings):
@@ -183,10 +242,15 @@ def analyze_node(node):
                 continue
             kind = obj.get("type")
             if kind == "turn_context":
-                context = {"model": payload.get("model") or "unknown",
-                           "effort": payload.get("effort") or payload.get("reasoning_effort") or "unknown"}
-                if payload.get("turn_id"):
-                    contexts[payload["turn_id"]] = context.copy()
+                tag = "invalid_identity_context"
+                model = identity_value(payload.get("model"), warnings, tag) or "unknown"
+                effort = identity_value(first_value(payload, "effort", "reasoning_effort"), warnings, tag) or "unknown"
+                context = {"model": model, "effort": effort}
+                turn = payload.get("turn_id")
+                if isinstance(turn, str) and turn:
+                    contexts[turn] = context.copy()
+                elif turn is not None and turn != "":
+                    warnings.append(tag)
                 observed.add((context["model"], context["effort"]))
             is_usage = kind == "token_usage_record" or (kind == "event_msg" and payload.get("type") == "token_usage_record")
             if is_usage:
@@ -197,15 +261,19 @@ def analyze_node(node):
                 usage = normalized_usage(payload.get("usage"), warnings)
                 if usage is None:
                     continue
-                active = contexts.get(payload.get("turn_id"), context)
-                model = payload.get("model") or active.get("model", "unknown")
-                effort = payload.get("effort") or payload.get("reasoning_effort") or (active.get("effort", "unknown") if model == active.get("model") else "unknown")
+                tag = "invalid_identity_record"
+                turn = payload.get("turn_id")
+                active = contexts.get(turn, context) if isinstance(turn, str) else context
+                if turn is not None and not isinstance(turn, str):
+                    warnings.append(tag)
+                model = identity_value(payload.get("model"), warnings, tag) or active.get("model", "unknown")
+                effort = identity_value(first_value(payload, "effort", "reasoning_effort"), warnings, tag)
+                if effort is None:
+                    effort = active.get("effort", "unknown") if model == active.get("model") else "unknown"
+                response = text_id(payload.get("response_id")) or text_id(payload.get("id"))
                 event = {"timestamp": iso(stamp), "model": model, "effort": effort, "usage": usage,
-                         "source": "per_response", "response_id": payload.get("response_id") or payload.get("id")}
-                if not isinstance(model, str) or not isinstance(effort, str):
-                    warnings.append("invalid_identity_record")
-                    continue
-                identity = event["response_id"] if isinstance(event["response_id"], str) else None
+                         "source": "per_response", "response_id": response}
+                identity = response
                 fingerprint = hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest()
                 if identity:
                     if identity in seen_ids:
@@ -279,7 +347,22 @@ def summarize_thread(thread, day=None, tz=UTC, include_events=False):
     return result
 
 
-def build_report(root_id, threads, include_guardian=False, day=None, tz=UTC, include_events=False, warnings=None):
+def relevant_for_day(thread, day, tz):
+    """A thread counts for a day only with in-day responses, or, when it has no
+    per-response records at all, when its observed span touches that day."""
+    def local(value):
+        stamp = parse_ts(value)
+        return stamp.astimezone(tz).date().isoformat() if stamp else None
+    if any(local(e["timestamp"]) == day for e in thread["events"]):
+        return True
+    if thread["events"]:
+        return False
+    first, last = local(thread["first_observed"]), local(thread["last_observed"])
+    return first is None or last is None or first <= day <= last
+
+
+def build_report(root_id, threads, include_guardian=False, day=None, tz=UTC, include_events=False, warnings=None,
+                 index_warnings=None):
     result, totals, aggregated = [], empty_usage(), {}
     notes = list(warnings or [])
     for thread in threads:
@@ -300,7 +383,9 @@ def build_report(root_id, threads, include_guardian=False, day=None, tz=UTC, inc
             "day": day, "timezone": str(tz), "threads": result, "by_model_effort": list(aggregated.values()),
             "confirmed_usage": totals, "warnings": sorted(set(notes)), "upstream_routing_verified": False,
             "billing_verified": False, "legacy_snapshots_excluded_from_totals": True,
-            "complete": not notes}
+            "complete": not notes,
+            # Unrelated/unattributable files: diagnostics only, never affect complete/--strict.
+            "index_warnings": sorted(set(index_warnings or []))}
 
 
 def render(report):
@@ -330,6 +415,8 @@ def render(report):
         lines.append(f'Cache hit rate on reported input: {100*total["cached_input_tokens"]/total["input_tokens"]:.1f}%')
     if report["warnings"]:
         lines += ['', 'Warnings / incomplete evidence:', *['- ' + w for w in report['warnings']]]
+    if report.get("index_warnings"):
+        lines.append(f'Index diagnostics outside this selection (do not affect completeness): {len(report["index_warnings"])}; see JSON index_warnings.')
     lines += ['', 'Not actual charges or quota consumption. Observed thread spans do not prove parallel execution.']
     return '\n'.join(lines)
 
@@ -337,7 +424,9 @@ def render(report):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sessions-dir", default=str(Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser() / "sessions"))
-    parser.add_argument("--cwd", help="Root project directory filter")
+    parser.add_argument("--include-archived", action="store_true",
+                        help="Also scan archived_sessions next to --sessions-dir ($CODEX_HOME/archived_sessions by default)")
+    parser.add_argument("--cwd", help="Root project directory filter (includes its subdirectories)")
     selector = parser.add_mutually_exclusive_group(required=True)
     selector.add_argument("--list", action="store_true")
     selector.add_argument("--root", help="Root ID or unique prefix: includes ALL dates")
@@ -365,19 +454,33 @@ def main(argv=None):
         parser.error("--limit must be positive")
     directory = Path(args.sessions_dir).expanduser()
     if not directory.is_dir():
-        print("Sessions directory not found", file=sys.stderr)
+        print(f"Sessions directory not found: {directory}", file=sys.stderr)
         return 2
-    warnings = []
-    sessions = index_sessions(directory, warnings)
+    index_warnings, directories = [], [directory]
+    if args.include_archived:
+        archived = directory.parent / "archived_sessions"
+        if archived.is_dir():
+            directories.append(archived)
+        else:
+            index_warnings.append("archived_sessions_dir_missing")
+    sessions, lineage_warnings = index_sessions(directories, index_warnings)
+    if not args.include_archived:
+        for root, notes in lineage_warnings.items():
+            if any(n.startswith("missing_root_metadata:") for n in notes):
+                notes.append("archived_sessions_not_scanned:missing_member_may_be_archived")
+    project = Path(args.cwd).expanduser().resolve() if args.cwd else None
+    def within_project(cwd):
+        if not isinstance(cwd, str) or not cwd:
+            return False
+        path = Path(cwd).expanduser().resolve()
+        return path == project or project in path.parents
     chosen = {}
     for root, nodes in sessions.items():
         root_node = next((n for n in nodes if n["meta"].get("id") == root), None)
-        if root_node is None:
-            warnings.append("missing_root_metadata:" + str(root))
-            if args.cwd or args.date:
-                continue
+        if root_node is None and (args.cwd or args.date):
+            continue
         meta = root_node["meta"] if root_node else {}
-        if args.cwd and Path(meta.get("cwd") or "/").resolve() != Path(args.cwd).expanduser().resolve():
+        if project and not within_project(meta.get("cwd")):
             continue
         started = parse_ts(meta.get("timestamp"))
         if args.date and (not started or started.astimezone(tz).date().isoformat() != args.date):
@@ -392,6 +495,10 @@ def main(argv=None):
     if not chosen:
         print("No matching sessions", file=sys.stderr)
         return 1
+    def split_warnings(selected):
+        own = [w for root in selected for w in lineage_warnings.get(root, [])]
+        other = [w for root, notes in lineage_warnings.items() if root not in selected for w in notes]
+        return own, index_warnings + other
     def started_key(pair):
         root, nodes = pair
         meta = next((n["meta"] for n in nodes if n["meta"].get("id") == root), {})
@@ -402,8 +509,10 @@ def main(argv=None):
             meta = next((n["meta"] for n in nodes if n["meta"].get("id") == root), {})
             listing.append({"root": root, "started": meta.get("timestamp"), "cwd": meta.get("cwd"),
                             "subagents": sum(n["meta"].get("id") != root and not guardian(thread_role(n["meta"])[0]) for n in nodes)})
+        warnings, other = split_warnings({row["root"] for row in listing})
+        warnings = sorted(set(warnings))
         if args.format == "json":
-            print(json.dumps({"sessions": listing, "warnings": warnings}, indent=2))
+            print(json.dumps({"sessions": listing, "warnings": warnings, "index_warnings": sorted(set(other))}, indent=2))
         else:
             for row in listing:
                 print(f'{row["started"]} {row["root"]} workers={row["subagents"]} {row["cwd"]}')
@@ -419,9 +528,22 @@ def main(argv=None):
             return 1
         root, nodes = max(candidates.items(), key=started_key)
         chosen = {root: nodes}
-    threads = [analyze_node(n) for ns in chosen.values() for n in ns]
+    threads, used = [], set()
+    for lineage, nodes in chosen.items():
+        for node in nodes:
+            thread = analyze_node(node)
+            if args.day and not relevant_for_day(thread, args.day, tz):
+                continue  # No in-day work: its whole-session evidence is not this day's.
+            threads.append(thread)
+            used.add(lineage)
+    warnings, other = split_warnings(used)
+    if not (args.root or args.latest or args.latest_with_workers or args.cwd):
+        # Not narrowed to known roots (e.g. --day or --date without --cwd): a
+        # rollout that could not be tied to any session may hold usage in this
+        # selection, so it makes the report incomplete.
+        warnings = warnings + [w for w in other if w.startswith(UNATTRIBUTED_PREFIXES)]
     root = next(iter(chosen)) if len(chosen) == 1 and not args.day else None
-    report = build_report(root, threads, args.include_guardian, args.day, tz, args.include_events, warnings)
+    report = build_report(root, threads, args.include_guardian, args.day, tz, args.include_events, warnings, other)
     if args.date:
         report["root_started_on"] = args.date
     print(json.dumps(report, indent=2, ensure_ascii=False) if args.format == "json" else render(report))

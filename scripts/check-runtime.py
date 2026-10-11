@@ -3,14 +3,25 @@
 from __future__ import annotations
 import argparse
 import json
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 
-if sys.version_info < (3, 11):
-    raise SystemExit("Python 3.11+ required")
-import tomllib
+if sys.version_info < (3, 9):
+    raise SystemExit("Python 3.9+ required")
+try:  # Python 3.11+
+    import tomllib
+    TOML_PARSER = "tomllib"
+except ModuleNotFoundError:
+    try:  # Optional third-party backport on 3.9/3.10.
+        import tomli as tomllib
+        TOML_PARSER = "tomli"
+    except ModuleNotFoundError:
+        tomllib = None
+        TOML_PARSER = "minimal"
 
 EXPECTED = {
     "als_explorer": ("gpt-6-luna", "medium"),
@@ -25,15 +36,87 @@ EXPECTED = {
 SMOKE_ROLES = ("als_explorer", "als_worker", "als_hard_worker", "als_reviewer")
 
 
+MINIMAL_KEY = re.compile(r'^([A-Za-z0-9_-]+)\s*=\s*(.*?)\s*$')
+MINIMAL_TABLE = re.compile(r'^\[([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\]\s*(?:#.*)?$')
+MINIMAL_VALUE = re.compile(r'^("(?:[^"\\]|\\.)*"|\'[^\']*\'|true|false|[+-]?[0-9]+)\s*(?:#.*)?$')
+
+
+def load_minimal_toml(text):
+    """Fallback for Python 3.9/3.10 without tomli: NOT a TOML parser.
+
+    Reads only `key = "string"` (or 'literal'), `true`/`false`, plain integers and
+    simple `[table]` headers, which covers ALS role files and the checked
+    config keys. Multi-line strings are skipped; any other value is left out
+    rather than guessed, so a check on it reports a mismatch.
+    """
+    data, table, closing = {}, None, None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if closing:
+            if closing in line:
+                closing = None
+            continue
+        if not line or line.startswith("#"):
+            continue
+        header = MINIMAL_TABLE.match(line)
+        if header:
+            table = data
+            for part in header.group(1).split("."):
+                table = table.setdefault(part, {})
+            continue
+        pair = MINIMAL_KEY.match(line)
+        if not pair:
+            continue
+        key, value = pair.groups()
+        for quote in ('"""', "'''"):
+            if value.startswith(quote):
+                if value.count(quote) < 2:
+                    closing = quote
+                break
+        else:
+            literal = MINIMAL_VALUE.match(value)
+            if literal:
+                token = literal.group(1)
+                if token.startswith('"'):
+                    parsed = json.loads(token)
+                elif token.startswith("'"):
+                    parsed = token[1:-1]
+                elif token in ("true", "false"):
+                    parsed = token == "true"
+                else:
+                    parsed = int(token)
+                target = data if table is None else table
+                if key in target:
+                    raise ValueError("Duplicate key in minimal TOML fallback: " + key)
+                target[key] = parsed
+    return data
+
+
 def load_toml(path):
+    if tomllib is None:
+        return load_minimal_toml(path.read_text(encoding="utf-8"))
     with path.open("rb") as stream:
         return tomllib.load(stream)
 
 
-def inspect_config(project):
+def config_locations(project, codex_home=None):
+    """(config.toml, agents dir, source). Project ALS files win; a project
+    without ALS role files uses the global install: $CODEX_HOME/als.config.toml
+    (the `als` profile) and $CODEX_HOME/agents/."""
+    agents = project / ".codex/agents"
+    if any(agents.glob("als_*.toml")):
+        return project / ".codex/config.toml", agents, "project"
+    home = Path(codex_home or os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+    return home / "als.config.toml", home / "agents", "global"
+
+
+def inspect_config(project, codex_home=None):
     problems, values = [], {}
+    config_path, agents_dir, source = config_locations(project, codex_home)
+    values["config_source"] = source
+    values["config_path"] = str(config_path)
     try:
-        config = load_toml(project / ".codex/config.toml")
+        config = load_toml(config_path)
         values["head"] = [config.get("model"), config.get("model_reasoning_effort")]
         if values["head"] != ["gpt-6-astra", "medium"]:
             problems.append("HEAD config does not match Astra Medium")
@@ -44,25 +127,32 @@ def inspect_config(project):
             if agents.get(key) != expected:
                 problems.append("Unexpected agents." + key)
         for role, expected in EXPECTED.items():
-            data = load_toml(project / ".codex/agents" / (role + ".toml"))
+            data = load_toml(agents_dir / (role + ".toml"))
             actual = (data.get("model"), data.get("model_reasoning_effort"))
             values[role] = actual
             if data.get("name") != role or actual != expected:
                 problems.append("Role mismatch: " + role)
     except (OSError, ValueError) as ex:
-        problems.append("Cannot inspect project config: " + str(ex))
+        problems.append("Cannot inspect " + source + " config: " + str(ex))
     return values, problems
 
 
-def verify_report(data):
-    """Validate recorded usage identity, NOT model self-description/upstream routing."""
+def verify_report(data, notes=None):
+    """Validate recorded usage identity, NOT model self-description/upstream routing.
+
+    Only the selected lineage's ``warnings`` count; ``index_warnings`` (unrelated
+    rollouts) and extra roles are appended to ``notes`` without failing the check.
+    """
+    notes = [] if notes is None else notes
     problems, observed = [], {}
     if data.get("schema_version") != 2 or data.get("scope") != "full_session":
         return {}, ["Use an ALS schema-v2 full-session JSON report (--root, not --day)"]
     for thread in data.get("threads", []):
+        if thread.get("counted") is False:
+            continue  # Guardian threads excluded from the report's totals.
         for row in thread.get("per_model_effort", []):
             if row.get("responses", 0) > 0:
-                observed.setdefault(thread.get("role"), set()).add((row.get("model"), row.get("effort")))
+                observed.setdefault(str(thread.get("role")), set()).add((row.get("model"), row.get("effort")))
     expected = {role: EXPECTED[role] for role in SMOKE_ROLES}
     expected["root"] = ("gpt-6-astra", "medium")
     for role, pair in expected.items():
@@ -70,8 +160,17 @@ def verify_report(data):
             problems.append("Missing recorded response identity: " + role + " / " + "/".join(pair))
         if observed.get(role, set()) - {pair}:
             problems.append("Unexpected recorded identity for role: " + role)
+    for role in sorted(set(observed) - set(expected)):
+        if role in EXPECTED and observed[role] - {EXPECTED[role]}:
+            problems.append("Unexpected recorded identity for role: " + role)
+        elif role in EXPECTED:
+            notes.append("Extra ALS role outside the smoke set: " + role)
+        else:
+            notes.append("Unexpected extra role (identity not verified): " + role)
     if data.get("warnings"):
         problems.append("Usage report contains incomplete/ambiguous evidence warnings")
+    if data.get("index_warnings"):
+        notes.append(f'{len(data["index_warnings"])} index warnings outside the selected lineage ignored')
     return {k: sorted(v) for k, v in observed.items()}, problems
 
 
@@ -125,19 +224,28 @@ def main(argv=None):
     parser.add_argument("--smoke-prompt", action="store_true", help="Print instructions; does not execute them")
     args = parser.parse_args(argv)
     if args.smoke_prompt:
-        path = here / "smoke-test.txt" if here.name == ".astra-luna-sol" else here.parent / "docs/smoke-test.txt"
+        # Installed runtimes (project .astra-luna-sol/ or global $ALS_HOME) ship
+        # smoke-test.txt beside this script; a source checkout keeps it in docs/.
+        path = here / "smoke-test.txt"
+        if not path.is_file():
+            path = here.parent / "docs/smoke-test.txt"
         print(path.read_text(encoding="utf-8"))
         return 0
     values, problems = inspect_config(args.project.resolve())
     output = {"project_settings": values, "problems": problems, "live_workers_executed_by_this_check": False,
-              "upstream_routing_verified": False}
+              "upstream_routing_verified": False, "toml_parser": TOML_PARSER, "warnings": []}
+    if TOML_PARSER == "minimal":
+        output["warnings"].append("Python < 3.11 without tomli: TOML read by a minimal string/bool/int "
+                                  "line parser; install tomli for full parsing")
     if args.probe:
         output["runtime_probe"], warnings = probe()
         output["problems"].extend(warnings)
     if args.report:
-        recorded, warnings = verify_report(json.loads(args.report.read_text(encoding="utf-8")))
+        notes = []
+        recorded, problems = verify_report(json.loads(args.report.read_text(encoding="utf-8")), notes)
         output["recorded_worker_identities"] = recorded
-        output["problems"].extend(warnings)
+        output["problems"].extend(problems)
+        output["warnings"].extend(notes)
     output["status"] = "CHECK_FAILED_OR_INCOMPLETE" if output["problems"] else "CONFIG_AND_REQUESTED_CHECKS_OK"
     output["note"] = "Config/record checks are not a model quality benchmark, completion proof, or upstream billing proof."
     print(json.dumps(output, indent=2, ensure_ascii=False))

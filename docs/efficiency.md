@@ -1,4 +1,4 @@
-# ALS 0.4.0 — 호출·맥락·추론 수준·실측 최적화
+# ALS 0.5.0 — 호출·맥락·추론 수준·실측 최적화
 
 설정의 목표는 최저 토큰 숫자가 아니라 **검증된 작업 하나를 끝내는 전체 사용량과 시간**입니다.
 Astra Medium 총괄, Luna Medium/Max, Sol 6.1 High/Medium은 유지합니다. 별도 감독 AI,
@@ -6,10 +6,13 @@ Astra Medium 총괄, Luna Medium/Max, Sol 6.1 High/Medium은 유지합니다. �
 
 ## 적용 범위
 
-기존 0.3.x 작업과 JSON 계획은 그대로 읽고 실행합니다. 새 제한은 `prepare`로 만든
+`efficiency` 확장이 없는 기존 JSON 계획도 그대로 실행합니다(0.5부터 런타임 전용 task 키가
+들어 있으면 거절). 새 제한은 `prepare`로 만든
 `efficiency.version=1` 계획에만 적용합니다. 관리하지 않는 작업은 스킬의 지시를 따르며
 코드가 모든 호출을 강제 차단하지는 않습니다. Observe는 경고, Guarded는 지원되고 신뢰된
 PreToolUse 경로의 거절 결정입니다. 훅이 우회되거나 꺼져 있으면 강제 효과도 보장되지 않습니다.
+
+아래 명령은 `als`로 적었습니다. 프로젝트 모드에서는 `python3 .astra-luna-sol/harness.py`와 같습니다.
 
 ### 기본 정책
 
@@ -17,13 +20,23 @@ PreToolUse 경로의 거절 결정입니다. 훅이 우회되거나 꺼져 있�
   있으면 구체적인 `delegation_reason`으로 설명합니다. 테스트 이름만 붙여 무조건 호출하지 않습니다.
 - 탐색/자료 조사/단순 검증은 Luna Medium, 일반 구현/복잡한 테스트 설계는 Luna Max,
   복잡한 핵심 작업은 Sol High, 검수는 위험도에 따라 Sol Medium/High를 고릅니다.
+- 읽기 전용 kind(exploration, research, review)는 난도·위험도와 관계없이 **항상 읽기 전용 역할**에
+  남습니다. 복잡하거나 고위험인 탐색·조사에는 역할을 올리지 않고 준비된 task에
+  `recommend_escalation` 메모(명시적 `als_reviewer_deep` override 또는 HEAD 검토 권고)를 붙입니다.
+  이 값은 매번 다시 계산하며 입력으로 넣은 값은 무시합니다. 쓰기 가능한 역할로의 override는 거절합니다.
+  (읽기 전용은 역할 지시이며, 하위 에이전트는 부모 샌드박스를 물려받습니다.)
 - 역할이 이미 명시됐는데 권장 역할과 다르면 임의 변경하지 않고 설명된
   `role_override_reason`을 요구합니다. 고위험 작업의 경량 역할 하향은 거절합니다.
 - `balanced`: 동시 3개, 작성자 2개, 총 12회 생성. `lean`: 1/1/6. `throughput`: 6/2/24.
   모두 시작값일 뿐 최적 벤치마크가 아닙니다. 3개를 넘기려면 `parallel_reason`이 필요합니다.
   고위험 쓰기가 있는 계획은 작성자 1명부터 운영합니다. Codex 전체 상한 6개는 바꾸지 않습니다.
+- 프로필 값은 **실제 상한**입니다. 초안의 `efficiency.max_concurrent`·`max_writers`·`max_total_spawns`는
+  상한을 낮출 수만 있고, 더 큰 값은 상한으로 잘리며 `caller_limits_capped`에 기록됩니다. 준비된 계획을
+  손으로 고쳐 상한(또는 고위험 단일 작성자)을 넘기면 `start`의 `validate`가 거절합니다. `prepare`를 다시
+  실행하세요.
 - 신규 위임에는 명시 예산의 20%를 마무리 여유로 남깁니다. 실제 과금/생성 중 응답의
-  하드 상한은 아니며、HEAD의 미래 사용량을 자동으로 중단하지 않습니다.
+  하드 상한은 아니며, HEAD의 미래 사용량을 자동으로 중단하지 않습니다.
+- 예산·추정·이력은 **counted tokens = 비캐시 입력 + 출력**으로 셉니다. 캐시 입력은 제외합니다.
 
 ## 계획 예시 — 준비 단계는 모델을 호출하지 않습니다
 
@@ -45,28 +58,31 @@ PreToolUse 경로의 거절 결정입니다. 훅이 우회되거나 꺼져 있�
     "write_paths": ["src/validation.py"], "resources": [], "depends_on": [],
     "checks": ["unit"], "estimate_tokens": 0
   }],
-  "checks": [{"id": "unit", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"], "timeout": 120}],
+  "checks": [{"id": "unit", "argv": ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"], "timeout": 120}],
   "criteria": [{"id": "behavior", "description": "요구된 입력 동작을 실제 결과로 확인"}],
   "budget": {"tokens": 0, "seconds": 0}
 }
 ```
 
 ```bash
-python3 .astra-luna-sol/harness.py prepare --plan /tmp/als-draft.json > /tmp/als-prepared.json
+als prepare --plan /tmp/als-draft.json > /tmp/als-prepared.json
 # 위 명령이 성공했을 때만 준비된 계획을 검토하고 등록
-python3 .astra-luna-sol/harness.py start --plan /tmp/als-prepared.json --session 실제세션ID
-python3 .astra-luna-sol/harness.py task-message --run 실제작업ID --task fix
+als start --plan /tmp/als-prepared.json --session 실제세션ID
+als task-message --run 실제작업ID --task fix
 ```
 
 `kind`: exploration, research, test_execution, test_design, implementation, review.
 `complexity`: trivial, bounded, complex. `risk`: low, normal, high.
 분류는 호출자가 제공하는 정보이며 하네스가 코드 난도를 자동 이해하는 것은 아닙니다.
-같은 목표·범위·완료 조건을 복제한 계획은 합치도록 거절합니다. 검수는 구현과 다른 kind입니다.
+같은 목표·범위·완료 조건을 복제한 계획은 합치도록 거절합니다. 중복 판정은 정확한 일치만 봅니다:
+kind, 정규화한 objective, context_files, write_paths, resources, **checks, constraints**, acceptance,
+**risk, complexity, role**이 모두 같아야 중복입니다. 하나라도 다르면 별개의 task입니다.
+검수는 구현과 다른 kind입니다.
 
 준비된 계획의 HEAD 작업도 자원 예약을 거칩니다.
 
 ```bash
-python3 .astra-luna-sol/harness.py begin-head --run 실제작업ID --task 직접처리작업ID
+als begin-head --run 실제작업ID --task 직접처리작업ID
 # 승인된 작업을 HEAD가 수행한 다음, 실제 결과를 finish로 기록
 ```
 
@@ -89,11 +105,12 @@ PreToolUse가 실제로 전달한 `fork_context=true`에는 `full_context_reason
 ## 사용량 분석 — 자동으로 기록을 조작하지 않습니다
 
 ```bash
-python3 .astra-luna-sol/harness.py status --run 실제작업ID --compact
-python3 .astra-luna-sol/harness.py sync-usage --run 실제작업ID
-python3 .astra-luna-sol/harness.py analyze --run 실제작업ID
-# 보관한 ALS harness schema-1 JSON report도 로컬 분석 가능
-python3 .astra-luna-sol/harness.py analyze --report-file /tmp/als-run-report.json
+als status --run 실제작업ID --compact
+als sync-usage --run 실제작업ID
+als analyze --run 실제작업ID
+# 보관한 run report JSON(schema_version 1 또는 2, `workers` 배열 필수)도 로컬 분석 가능
+als report --run 실제작업ID > /tmp/als-run-report.json
+als analyze --report-file /tmp/als-run-report.json
 ```
 
 입력/캐시 입력/출력/추론, 비캐시 입력, HEAD 비중, 응답·재시도 횟수, 전달 메시지 길이와
@@ -113,22 +130,33 @@ python3 .astra-luna-sol/harness.py analyze --report-file /tmp/als-run-report.jso
 허용합니다. 실패한 작업도 취소·정리 후 fail로 남겨 선택 편향을 줄입니다.
 
 ```bash
-python3 .astra-luna-sol/harness.py measure --run 실제작업ID \
+als measure --run 실제작업ID \
   --workload bounded-fix --quality pass --ack-recorded-only
-python3 .astra-luna-sol/harness.py analyze --workload bounded-fix
+als analyze --workload bounded-fix
 ```
 
 같은 프로젝트·workload, 동일 역할/난도/위험도이며 사용자/HEAD가 검토한 production 작업이
 5개 이상 있어야 추정치를 제공합니다. 진단용 작업(purpose=diagnostic)은 제외합니다. 동일 run의
-여러 작업을 5번 실험한 것처럼 세지 않습니다. 누락·경고·역할 불일치가 있으면 사용하지 않습니다.
+여러 작업을 5번 실험한 것처럼 세지 않습니다.
+
+이력에서 run을 빼는 기준은 **사용량 무결성 문제**뿐입니다.
+- run 경고 중 `no response ID`, `not_reported:cached_input_tokens`, `reported_total_differs`로
+  시작하는 것은 무해한 것으로 보고 허용합니다. 그 밖의 경고가 있으면 제외합니다.
+- claim이 남은 task, HEAD 세션 사용량 없음, 캐시 > 입력 같은 손상된 기록, 요청한 모델·effort와
+  기록된 신원이 다른 스레드, 사용량 없이 **성공한** 시도는 제외 사유입니다.
+- 스레드에 연결되지 않았거나 사용량이 없는 **실패** 시도는 제외하지 않고 비용 0의 실패로 셉니다.
+- 품질 `fail`인 run도 실패로 그대로 셉니다(성공만 고르는 선택 편향 방지).
 이 품질 표시는 호출자의 판단 기록이지 독립 평가나 인증된 사용자 신원이 아닙니다.
 
-권고는 관측 P80에 25% 여유를 더한 토큰 추정치, 실패·재시도에 따른 병렬 제한 축소입니다.
+권고는 같은 역할/kind/난도/위험도 묶음별 counted tokens(비캐시 입력 + 출력)의 관측 P80에
+25% 여유를 더한 추정치, 그리고 실패·재시도에 따른 병렬 제한 축소입니다. 실패 비율 40% 이상이면 1,
+10% 초과 또는 재시도 run 20% 초과면 2, 그 밖에 실패·재시도가 하나라도 있으면 3으로 제안합니다.
+실패·재시도가 전혀 없으면 프로필의 동시 수를 **줄이지 않습니다**.
 정확한 실제 소비량이나 인과적인 성능 향상을 보장하지 않습니다. 관측 이력으로 모델을
 자동 하향하거나 병렬 상한을 높이지 않습니다. 명시적으로 새 계획에만 적용합니다.
 
 ```bash
-python3 .astra-luna-sol/harness.py prepare --plan /tmp/als-draft.json \
+als prepare --plan /tmp/als-draft.json \
   --profile balanced --use-history > /tmp/als-prepared.json
 ```
 

@@ -11,14 +11,58 @@
 
 ## 2. 라이브 smoke는 사용자 동의 후 별도로
 
-`check-runtime.py --smoke-prompt`로 지시문을 출력한다. `codex --sandbox read-only`로
-새 세션을 시작하여 사용자가 실행한다. 애플리케이션은 수정하지 않지만 HEAD와 4개 워커
-호출 비용은 발생한다. 이것은 의도적인 검증이므로 일반 작업의 '필요한 워커만 호출'
-원칙과 구분한다. ID를 기록하고 `usage.sh --root ID --format json`으로 내보낸다.
-`check-runtime.py --report ...`와 OpenCodex 요청 로그를 대조한다.
+smoke 지시문과 `check-runtime.py`의 설정 검사는 **프로젝트 모드 설치**(`als install PROJECT`)를
+기준으로 합니다(`.codex/config.toml`, `.codex/agents/`, `.astra-luna-sol/VERSION`을 읽음).
+전역 설치만 있는 저장소에서는 폐기 가능한 테스트 저장소에 프로젝트 모드로 설치해 수행하세요.
+
+1. 사전 점검(모델 호출 없음):
+   ```bash
+   cd ~/work/smoke-fixture
+   python3 .astra-luna-sol/check-runtime.py --probe
+   python3 .astra-luna-sol/check-runtime.py --smoke-prompt > /tmp/als-smoke.txt
+   ```
+2. `codex --sandbox read-only`로 **새 세션**을 열고 `/tmp/als-smoke.txt` 지시를 붙여 넣습니다.
+   애플리케이션은 수정하지 않지만 HEAD와 4개 워커 호출 비용이 발생합니다. 일반 작업의
+   '필요한 워커만 호출' 원칙과 구분되는 의도적 검증입니다.
+3. 세션 ID를 확인하고 사용량을 내보낸 뒤 대조합니다.
+   ```bash
+   python3 .astra-luna-sol/token_usage.py --list --cwd "$PWD" --limit 5
+   python3 .astra-luna-sol/token_usage.py --root SESSION_ID --format json --strict > /tmp/als-smoke.json
+   python3 .astra-luna-sol/check-runtime.py --report /tmp/als-smoke.json
+   ```
+   `check-runtime.py`는 문제가 있으면 종료 코드 2입니다. OpenCodex 요청 로그와도 대조합니다.
+
+`check-runtime.py --report`는 **선택한 lineage의 `warnings`만** 판정에 씁니다. `index_warnings`와
+smoke 세트 밖의 추가 역할은 `warnings` 메모로만 남기고 실패시키지 않습니다. Python 3.9/3.10에
+`tomli`가 없으면 문자열·불리언·정수만 읽는 최소 TOML 대체 파서를 쓰고 그 사실을 경고합니다.
 
 실행되지 않은 워커, 가용하지 않은 역할, 요청/실행 모델 차이, 로그 누락은 실패 또는
 미확인으로 남긴다. 스레드 시작/종료 시간의 단순 중첩을 실제 병렬 계산으로 단정하지 않는다.
+
+## 사용량 리포터 (`token_usage.py`)
+
+`als usage ARGS`는 현재 저장소를 `--cwd`로 넘겨 `token_usage.py`를 실행합니다.
+프로젝트 모드의 `usage.sh`도 같습니다. 세션 로그는 읽기만 합니다.
+
+| 옵션 | 의미 |
+|---|---|
+| `--list` / `--root ID` / `--latest` / `--latest-with-workers` / `--day YYYY-MM-DD` | 선택 방식(하나 필수). `--root`는 고유 접두사, 모든 날짜의 lineage 포함 |
+| `--date YYYY-MM-DD` | **root 시작일**로 세션을 고르고 lineage 전체를 유지 |
+| `--day YYYY-MM-DD` | 그날 `--timezone` 기준 **응답 타임스탬프**만 집계. 그날 응답이 없는 스레드는 제외. `--date`와 함께 쓸 수 없음 |
+| `--cwd DIR` | root 세션의 cwd가 DIR 또는 그 **하위 디렉터리**인 세션만 |
+| `--include-archived` | `--sessions-dir` 옆의 `archived_sessions`도 검색(기본 `$CODEX_HOME/archived_sessions`) |
+| `--include-events` | 스레드별 응답 이벤트 상세를 포함 |
+| `--include-guardian` | guardian 스레드도 포함 |
+| `--strict` | 선택한 리포트에 `warnings`가 있으면 종료 코드 3 |
+| `--sessions-dir`, `--timezone`, `--limit`, `--format md\|json` | 입력 위치, 시간대, 목록 개수, 출력 형식 |
+
+`warnings`와 `index_warnings`는 다릅니다.
+- `warnings`: **선택한 lineage**의 파일에서 나온 문제(손상·잘림·누락 메타데이터, 너무 큰 줄 등).
+  완전성 판단과 `--strict`에 영향을 줍니다.
+- `index_warnings`: 선택 밖의 관련 없는 로그 파일, 또는 `archived_sessions_dir_missing` 같은 색인
+  진단입니다. 보고만 하고 완전성이나 `--strict`에 영향을 주지 않습니다.
+- 아카이브를 검색하지 않았는데 root 메타데이터가 없으면
+  `archived_sessions_not_scanned:missing_member_may_be_archived`가 붙습니다. `--include-archived`로 다시 확인하세요.
 
 ## 3. 최초 비교안
 

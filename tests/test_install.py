@@ -4,8 +4,14 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9/3.10: installer tests need tomllib or tomli
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        raise unittest.SkipTest('needs tomllib (3.11+) or tomli')
 from unittest.mock import patch
 import install
 

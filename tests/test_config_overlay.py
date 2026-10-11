@@ -1,6 +1,13 @@
 import base64
 import copy
 import unittest
+try:
+    import tomllib  # noqa: F401
+except ModuleNotFoundError:  # Python 3.9/3.10: installer tests need tomllib or tomli
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        raise unittest.SkipTest('needs tomllib (3.11+) or tomli')
 import config_overlay as c
 
 class OverlayTests(unittest.TestCase):

@@ -1,13 +1,38 @@
 """Installer/hook coexistence and installed entrypoint tests, no Codex calls."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+try:
+    import tomllib  # noqa: F401
+except ModuleNotFoundError:  # Python 3.9/3.10: installer tests need tomllib or tomli
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        raise unittest.SkipTest('needs tomllib (3.11+) or tomli')
 import install
 
 ROOT=Path(__file__).resolve().parents[1]
+
+
+FAKE_CODEX = ('#!/bin/sh\nif [ "$1" = features ]; then printf "hooks stable true\\nmulti_agent stable true\\n"; '
+              'else echo "codex-cli 9.9.9"; fi\n')
+
+
+def fake_codex_dir(base):
+    """Directory holding a fake `codex` so doctor never depends on the host's Codex CLI."""
+    folder = Path(base) / 'fake-bin'
+    folder.mkdir(exist_ok=True)
+    exe = folder / 'codex'
+    exe.write_text(FAKE_CODEX)
+    exe.chmod(0o755)
+    ocx = folder / 'ocx'  # deps also runs `ocx --version`
+    ocx.write_text('#!/bin/sh\necho ocx 0.0.0\n')
+    ocx.chmod(0o755)
+    return folder
 
 class HarnessInstallTests(unittest.TestCase):
     def setUp(self):
@@ -20,9 +45,12 @@ class HarnessInstallTests(unittest.TestCase):
         self.assertTrue((self.p/'.codex/hooks.json').exists())
         for name in ('harness.py','als_harness/state.py','als_harness/engine.py','harness-guide.md'):
             self.assertTrue((self.p/'.astra-luna-sol'/name).is_file())
-        r=subprocess.run([sys.executable,str(self.p/'.astra-luna-sol/harness.py'),'doctor'],capture_output=True,text=True)
+        # A fake codex on PATH: the result must not depend on the host's Codex install.
+        env=dict(os.environ,PATH=str(fake_codex_dir(self.tmp.name))+os.pathsep+os.environ.get('PATH',''))
+        r=subprocess.run([sys.executable,str(self.p/'.astra-luna-sol/harness.py'),'doctor'],capture_output=True,text=True,env=env)
         self.assertEqual(r.returncode,0,r.stderr)
         d=json.loads(r.stdout);self.assertTrue(d['hooks_configured']);self.assertFalse(d['paid_model_calls'])
+        self.assertIn('codex-cli 9.9.9',[i['found'] for i in d['deps']['items'] if i['name']=='codex'])
         self.assertFalse((self.p/'.astra-luna-sol/state').exists())
     def test_user_hooks_survive_upgrade_uninstall(self):
         self.p.joinpath('.codex').mkdir()
@@ -86,13 +114,14 @@ class HarnessInstallTests(unittest.TestCase):
         self.assertEqual(ignore.read_bytes(),old)
         self.assertEqual((runtime/'keep').read_text(),'do-not-remove')
 
-    def test_unowned_identical_ignore_without_runtime_not_adopted(self):
+    def test_identical_ignore_without_runtime_is_adopted(self):
+        # 0.5: a retained release-identical ignore file is adopted even after
+        # the user deleted state/evidence (previously a reinstall dead end).
         target=self.p/'.astra-luna-sol'
         target.mkdir()
         (target/'.gitignore').write_bytes((ROOT/'profiles/runtime.gitignore').read_bytes())
         result=self.call('--dry-run')
-        self.assertEqual(result.returncode,2)
-        self.assertIn('User-owned path already exists',result.stderr)
+        self.assertEqual(result.returncode,0,result.stderr)
         self.assertFalse((target/'manifest.json').exists())
 
     def test_hooks_removed_when_skip_selected(self):

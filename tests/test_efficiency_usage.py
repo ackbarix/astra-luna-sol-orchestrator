@@ -35,20 +35,20 @@ class IncrementalTests(unittest.TestCase):
     def test_completed_root_excludes_later_task(self):
         r=self.e.start(plan(),'root');x=self.s.run(r);start=x['created'];x['closed_at']=start+2;x['status']='completed';self.s.save_run(x)
         self.file(records(start));usage.sync_path(self.s,self.s.run(r),self.log)
-        self.assertEqual(self.n(r),100)
+        self.assertEqual(self.n(r),50)
     def test_each_run_has_separate_cursor(self):
         first=self.e.start(plan(),'root');x=self.s.run(first);start=x['created'];x['closed_at']=start+2;x['status']='completed';self.s.save_run(x)
         self.file(records(start));usage.sync_path(self.s,self.s.run(first),self.log)
         second=self.e.start(plan(),'root');x=self.s.run(second);x['created']=start+3;self.s.save_run(x)
         usage.sync_path(self.s,self.s.run(second),self.log)
-        self.assertEqual(self.n(first),100);self.assertEqual(self.n(second),200)
-        usage.sync_path(self.s,self.s.run(second),self.log);self.assertEqual(self.n(second),200)
+        self.assertEqual(self.n(first),50);self.assertEqual(self.n(second),150)
+        usage.sync_path(self.s,self.s.run(second),self.log);self.assertEqual(self.n(second),150)
     def test_late_child_not_silently_dropped_after_cancel(self):
         r=self.e.start({'goal':'child','tasks':[{'id':'x','role':'als_explorer'}]},'root')
         self.e.reserve(r,'x','call');self.e.bind(r,'call','kid');x=self.s.run(r);start=x['created'];x['closed_at']=start+2;x['status']='cancelled';self.s.save_run(x)
         items=records(start);items[0]['payload']['id']='kid';self.file(items)
         usage.sync_path(self.s,self.s.run(r),self.log)
-        self.assertEqual(self.n(r),300)
+        self.assertEqual(self.n(r),200)
         self.assertTrue(any('after run closure' in w for w in self.s.run(r)['warnings']))
     def test_legacy_boundary_warning(self):
         r=self.e.start(plan(),'root');x=self.s.run(r);start=x['created'];x['status']='completed';self.s.save_run(x)
@@ -57,7 +57,7 @@ class IncrementalTests(unittest.TestCase):
     def test_incomplete_line_does_not_consume_tail(self):
         r=self.e.start(plan(),'root');start=self.s.run(r)['created'];self.file(records(start))
         with self.log.open('a') as f:f.write('{"type":')
-        result=usage.sync_path(self.s,self.s.run(r),self.log);self.assertEqual(self.n(r),300)
+        result=usage.sync_path(self.s,self.s.run(r),self.log);self.assertEqual(self.n(r),200)
         result=usage.sync_path(self.s,self.s.run(r),self.log);self.assertEqual(result['bytes_read'],0)
 
 class AnalysisInputTests(unittest.TestCase):

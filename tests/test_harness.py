@@ -175,7 +175,7 @@ class HarnessTests(unittest.TestCase):
         with patch.dict(os.environ,{'CODEX_HOME':str(home)}):
             usage.sync_path(self.s,self.s.run(r),file);usage.sync_path(self.s,self.s.run(r),file)
         result=report.report(self.e,r)
-        self.assertEqual(result['budget']['confirmed_tokens'],220)
+        self.assertEqual(result['budget']['confirmed_tokens'],80)  # counted: uncached input + output
         self.assertEqual({x['recorded_effort'] for x in result['usage_by_thread_model_effort']},{'high','medium'})
     def test_budget_estimate_stops_new_reservation(self):
         t=self.task();t['estimate_tokens']=101;p=self.plan([t]);p['budget']={'tokens':100}
@@ -195,7 +195,11 @@ class HarnessTests(unittest.TestCase):
     def test_cli_full_head_only_flow(self):
         plan=self.project/'plan.json';plan.write_text(json.dumps(self.plan()))
         script=Path(__file__).resolve().parents[1]/'scripts/harness.py'
-        def call(*args):return subprocess.run([sys.executable,str(script),'--project',str(self.project),*args],capture_output=True,text=True)
+        # Repo script runs in global scope. Never inherit the caller's ALS_* or
+        # Codex session variables (e.g. an exported CODEX_THREAD_ID).
+        env={k:v for k,v in os.environ.items() if not k.startswith('ALS_') and k!='CODEX_THREAD_ID'}
+        env.update(ALS_STATE_HOME=str(Path(self.tmp.name)/'als-state'),CODEX_HOME=str(Path(self.tmp.name)/'codex'))
+        def call(*args):return subprocess.run([sys.executable,str(script),'--project',str(self.project),*args],capture_output=True,text=True,env=env)
         s=call('start','--plan',str(plan));self.assertEqual(s.returncode,0,s.stderr);rid=json.loads(s.stdout)['run']
         self.assertEqual(call('complete','--run',rid).returncode,3)
         self.assertEqual(call('verify','--run',rid,'--execute').returncode,0)
