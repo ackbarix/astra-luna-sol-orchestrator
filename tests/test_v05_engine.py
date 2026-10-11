@@ -14,7 +14,7 @@ from als_harness.state import Store, locate, evidence_root
 from als_harness import verify
 from als_harness.engine import Engine, validate_plan
 from als_harness import efficiency
-from als_harness.common import HarnessError, process_alive, process_start, redact, relative
+from als_harness.common import HarnessError, process_alive, process_info, process_start, redact, relative
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -354,6 +354,16 @@ class VerificationLockTests(EngineCase):
             time.sleep(.05)
         return not process_alive(pid, start)
 
+    def assert_dead(self, pid, start, verify_proc=None):
+        """wait_dead with a diagnostic message (platform process-state paths differ)."""
+        if self.wait_dead(pid, start):
+            return
+        raw = subprocess.run(['ps', '-o', 'pid=,ppid=,pgid=,stat=,lstart=,command=', '-p', str(pid)],
+                             capture_output=True, text=True)
+        self.fail('check group leader %s still alive: process_info=%r recorded_start=%r ps=%r verify_rc=%r'
+                  % (pid, process_info(pid), start, raw.stdout.strip(),
+                     verify_proc.poll() if verify_proc is not None else None))
+
     def test_lock_records_owner_and_check_group(self):
         rid = self.start(argv=self.SLOW)
         proc, lock = self.spawn_verify(rid)
@@ -384,7 +394,7 @@ class VerificationLockTests(EngineCase):
                 proc, lock = self.spawn_verify(rid)
                 self.e.pause(rid, 'operator stop', cancel=cancel)
                 self.assertIsNone(self.s.run(rid)['verification'])
-                self.assertTrue(self.wait_dead(lock['pgid'], lock['pgid_start']))
+                self.assert_dead(lock['pgid'], lock['pgid_start'], proc)
                 proc.wait(timeout=60)
                 self.assertEqual(self.s.run(rid)['evidence'], {})
 
@@ -395,7 +405,7 @@ class VerificationLockTests(EngineCase):
             self.e.resume(rid)
         self.e.resume(rid, workers_stopped=True)
         self.assertIsNone(self.s.run(rid)['verification'])
-        self.assertTrue(self.wait_dead(lock['pgid'], lock['pgid_start']))
+        self.assert_dead(lock['pgid'], lock['pgid_start'], proc)
         proc.wait(timeout=60)
         self.assertEqual(self.s.run(rid)['evidence'], {})
 
