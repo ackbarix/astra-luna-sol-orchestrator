@@ -105,6 +105,31 @@
   the missing sessions directory error names the path. `check-runtime.py` works from a global
   install (`smoke-test.txt` beside the script, `$CODEX_HOME/als.config.toml` and `agents/`).
 
+### Round-3 and round-4 installer and `als` fixes
+- Upgrading a 0.2/0.4 project install records the ALS directories it created, so a later
+  uninstall removes them when empty; `[features] hooks = true` is no longer mistaken for
+  inline hooks; `--check`/`--uninstall` of an installer-created `config.toml` work without a
+  TOML parser.
+- Hook commands work from submodules, with an exported `CDPATH`, with `HOME` unset (global
+  form `python3 "${HOME:-/abs/home}/.local/share/als/harness.py" hook`) and with git older
+  than 2.13 from a subdirectory (a relative `--git-common-dir` is resolved with
+  `--show-cdup`); a missing project harness exits 0. Older hook forms are recognised and
+  replaced on reinstall (`--check` reports them as outdated, exit 4).
+- A project install (with or without `--skip-hooks`) over `--hooks-only` hooks is refused
+  with the working remedy `als uninstall --hooks-only`.
+- `install.sh`/`setup.sh` honour `ALS_PYTHON`; the global install records the `ALS_HOME`
+  and `ALS_PYTHON` it used in the installed `als` (the environment still overrides), and
+  errors name the configured interpreter.
+- `als doctor --json` prints one `{"deps", "harness"}` object; exit 0 ok, 1 required
+  failure, 2 usage/state error. `--no-probe` skips only `codex features list`; probes are
+  bounded by `ALS_DEPS_TIMEOUT` (default 10 s). Against a 0.2–0.4 project install it skips
+  that harness and prints an upgrade/uninstall hint instead of failing; with a harness that
+  supports `--no-deps` the dependency report is printed once.
+- `als usage` without a selection option reports `--latest`; `als plan new` writes a
+  `python3 -B` check so verification does not trip on new `__pycache__` files.
+- Documented: run state under `~/.local/state/als/<hash>/` survives uninstall (delete it by
+  hand), and 0.3/0.4 manifests restore `hooks.json` JSON-equal rather than byte-equal.
+
 ### Not validated
 - No paid model or live Codex session was run for this release. Tests use synthetic logs,
   temporary Git projects and local commands; no performance or savings claim is made.

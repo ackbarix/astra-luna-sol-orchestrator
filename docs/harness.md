@@ -16,10 +16,31 @@ Python/SQLite 하네스가 등록된 개발 작업의 상태·예약·검증·�
 `<hash>` 디렉터리의 부모가 그 경로로 바뀝니다(절대 경로만 허용, 상대 경로는 오류). 상대 경로
 `XDG_STATE_HOME`은 XDG 규격대로 무시합니다. 같은 저장소의 워크트리와 하위 디렉터리는
 모두 메인 저장소 하나로 매핑됩니다. 상태 DB는 WAL 모드이며 명령은 5초, 훅은 2초까지 잠금을
-기다립니다. 프로젝트 상태는 Git에서 무시되며 제거 후에도 남습니다.
+기다립니다. 프로젝트 상태는 Git에서 무시되며 제거 후에도 남습니다. 전역·`--hooks-only` 범위의
+`<hash>/` 디렉터리도 `als uninstall --global`/`--hooks-only` 후에 남으므로, 필요 없으면
+`rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/als/<hash>"`로 지웁니다(경로는 `als doctor --json`의
+`harness.state_path`).
 
-훅 명령에는 프로젝트 절대 경로가 없습니다. 전역 훅은 `python3 "$HOME/.local/share/als/harness.py" hook`,
-프로젝트 훅은 `git rev-parse --git-common-dir`로 저장소를 찾습니다. PreToolUse/PostToolUse 그룹은
+훅 명령에는 프로젝트 절대 경로가 없습니다. 전역(`--hooks-only`) 훅은
+
+```sh
+python3 "${HOME:-/home/me}/.local/share/als/harness.py" hook
+```
+
+형태입니다. `/home/me`는 설치 때의 홈 절대 경로로, HOME이 설정되어 있으면 그 값을, Codex가 HOME 없이
+훅을 실행하면 기록된 경로를 씁니다. `ALS_HOME`이 홈 밖이거나 홈 경로에 따옴표가 필요한 문자가 있으면
+`python3 '/opt/als/harness.py' hook`처럼 절대 경로를 씁니다. Python이 PATH의 `python3`가 아니면
+그 절대 경로가 `python3` 자리에 들어갑니다. 프로젝트 훅은 다음 한 줄입니다.
+
+```sh
+c=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0; case $c in /*) ;; *) [ -d "$c" ] || c=$(git rev-parse --show-cdup 2>/dev/null)$c ;; esac; case $c in .git|*/.git) r=$(CDPATH= cd -- "$c/.." && pwd) ;; *) r=$(git rev-parse --show-toplevel 2>/dev/null) ;; esac || exit 0; s=$r/.astra-luna-sol/harness.py; [ -f "$s" ] || exit 0; exec python3 "$s" hook
+```
+
+`git rev-parse --git-common-dir`로 메인 저장소를 찾고(워크트리·하위 디렉터리 가능), git 2.13 미만이
+하위 디렉터리에서 최상위 기준 상대 경로를 돌려주면 `--show-cdup`으로 보정합니다. 공통 디렉터리가
+`.git`이 아니면(서브모듈) `--show-toplevel`을 씁니다. 하네스가 없거나 저장소 밖이면 0으로 끝납니다.
+이전 형태(0.3/0.4의 절대 경로 + `--project`, 이 보정 전 0.5 형태)는 재설치 때 ALS 그룹으로 인식되어
+교체됩니다. PreToolUse/PostToolUse 그룹은
 `spawn_agent`에만 매칭하므로 다른 도구 호출에는 Python을 띄우지 않습니다. 설치 후 Codex에서
 `/hooks`로 명령을 검토하고 **신뢰**해야 합니다. 설치기는 신뢰 절차를 우회하지 않습니다.
 
@@ -57,7 +78,7 @@ Observe에서도 `complete`는 실패한 검증을 성공으로 인증하지 않
      "resources": [], "depends_on": [], "checks": ["unit"], "estimate_tokens": 20000}
   ],
   "checks": [
-    {"id": "unit", "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+    {"id": "unit", "argv": ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"],
      "timeout": 120, "required": true}
   ],
   "criteria": [{"id": "behavior", "description": "요구된 로그인 동작과 오류 처리가 구현됨", "required": true}],
@@ -65,6 +86,8 @@ Observe에서도 `complete`는 실패한 검증을 성공으로 인증하지 않
 }
 ```
 
+- Python 검사에는 `-B`를 권장합니다(`als plan new` 템플릿 기본값). `__pycache__`를 무시하지 않는
+  저장소에서 검사가 바이트코드를 쓰면 검증 중 코드가 바뀐 것으로 판정될 수 있습니다.
 - `start --plan -`은 stdin에서 계획을 읽습니다.
 - `--session`을 생략하면 `CODEX_THREAD_ID`, 없으면(observe만) **최근 10분 안에 훅 이벤트(종류
   무관)가 있었던 세션이 정확히 하나**일 때 그 세션을 쓰고, 고른 세션 ID를 항상 경고로 출력합니다.
@@ -167,7 +190,7 @@ DB/훅 장애 시 Codex는 도구를 계속 실행합니다. `--yolo`는 하네�
 ```bash
 als sync-usage --run RUN_ID
 als report --run RUN_ID --format md     # JSON은 schema_version 2
-als usage --latest
+als usage --latest                      # 선택 옵션이 없으면 als usage가 --latest를 붙임
 ```
 
 등록된 root/child 세션 로그만 증분으로 읽습니다(기본 `$CODEX_HOME/sessions`, run에 기록된 세션
@@ -185,7 +208,7 @@ als usage --latest
 |---|---|
 | `install.sh` / `als install --check` | 0 정상, 1 미설치, 2 변경·거부, 4 구버전 |
 | `install.sh` / `als install` (그 외) | 0 성공, 2 거부(사전 점검 실패·수정된 관리 파일 등) |
-| `als doctor` / `harness.py doctor` | 필수 의존성이 없으면 1(필수 항목 `FAIL`), 선택 항목과 훅 미설치는 `warn`만(0) |
+| `als doctor` / `harness.py doctor` | 0 필수 항목 정상(선택 항목·훅 미설치·0.5 미만 프로젝트 설치는 경고만), 1 필수 의존성 실패(`FAIL`), 2 사용법·상태 오류 |
 | `token_usage.py` / `als usage` | 0 정상, 1 해당 세션 없음, 2 인자·세션 디렉터리 오류, 3 `--strict`에서 경고 |
 | `check-runtime.py` | 0 정상, 2 문제 발견 |
 
@@ -208,7 +231,12 @@ als usage --latest
 하네스 부분은 범위(project/global), 상태 DB 경로, 훅 파일 구성 여부와 관측된 이벤트를 보여줍니다.
 두 범위 모두 `PROJECT/.codex/hooks.json`(프로젝트·`--hooks-only` 설치)을 먼저, 이어서
 `$CODEX_HOME/hooks.json`(전역 설치)을 확인하고 훅을 찾은 파일을 표시합니다(`hooks_found_in`).
-`--no-probe`는 의존성 점검에서 외부 프로브를 생략합니다.
+`--no-probe`는 `codex features list`만 생략합니다(`codex-feature:*` 항목 없음). `git --version`,
+`codex --version`, `ocx --version`은 계속 실행하며 각각 `ALS_DEPS_TIMEOUT`초(기본 10)로 제한됩니다.
+`als doctor --json`은 `{"deps": ..., "harness": ...}` 객체 하나를 출력합니다. `harness`는 저장소 밖이면
+`null`, 0.5 미만 프로젝트 설치면 `{"outdated_project_install": VERSION, "message": ...}`이며, 그 경우
+그 하네스는 실행하지 않고 ``project install X is outdated: run `als install` (upgrade) or `als uninstall` ``을
+안내합니다. 하네스가 `--no-deps`를 지원하면 `als`가 넘겨 의존성 출력이 한 번만 나옵니다.
 configured(설정 존재), observed(콜백 도착), trust(사용자 신뢰), blocking(차단 실효성)은 서로 다르며,
 콜백을 봤다고 서빙 모델이나 보안 경계가 검증된 것은 아닙니다.
 

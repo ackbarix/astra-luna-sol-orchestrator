@@ -352,5 +352,19 @@ class OldGitTests(R4Sandbox, unittest.TestCase):
         self.assertEqual(json.loads((self.p / '.codex/hooks.json').read_text()), user)
 
 
+
+# ------------------------------------------------------------------ item 7
+class DocsTests(unittest.TestCase):
+    def test_hook_command_forms_documented(self):
+        guide = (ROOT / 'docs/harness.md').read_text()
+        readme = (ROOT / 'README.md').read_text()
+        self.assertIn(integration.command('project'), guide)
+        for text in (guide, readme):
+            self.assertIn('python3 "${HOME:-/home/me}/.local/share/als/harness.py" hook', text)
+            self.assertNotIn('python3 "$HOME/.local/share/als/harness.py" hook', text)
+        for name in ('ALS_DEPS_TIMEOUT', 'ALS_PYTHON', 'ALS_HOME', 'outdated_project_install'):
+            self.assertIn(name, readme)
+
+
 if __name__ == '__main__':
     unittest.main()
