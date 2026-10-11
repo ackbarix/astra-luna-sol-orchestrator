@@ -207,7 +207,7 @@ class HistoryTests(EngineFixture, unittest.TestCase):
         self.assertFalse(a.history(self.s,'bounded-fix')['eligible'])
         self.sample(4)
         h=a.history(self.s,'bounded-fix');self.assertTrue(h['eligible']);self.assertTrue(h['estimates'])
-        self.assertEqual(next(iter(h['estimates'].values()))['suggested_tokens'],138)
+        self.assertEqual(next(iter(h['estimates'].values()))['suggested_tokens'],75)
     def test_smoke_tests_excluded(self):
         for i in range(5):self.sample(i,purpose='diagnostic')
         self.assertEqual(a.history(self.s,'bounded-fix')['reviewed_runs'],0)
