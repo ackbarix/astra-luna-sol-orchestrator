@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 — bounded delegation, context contracts and reviewed calibration
+
+- Add versioned opt-in plan preparation: trivial low-risk tasks run directly in HEAD;
+  exact duplicate scopes, conflicting role selections and unsafe downgrades are rejected.
+- Preserve existing Astra/Luna/Sol role pins; use task kind, declared complexity/risk
+  and explained overrides rather than pretending narration changes model effort.
+- Add bounded reference-only worker contracts, character limits and explicit reasons
+  for full-parent context when the real tool exposes fork_context. Do not inject
+  unsupported arguments, rewrite permissions, ingest whole files or truncate failures.
+- Add lean/balanced/throughput profiles, per-run total spawn allowances, conservative
+  concurrent writers, HEAD resource reservations and 20% explicit-budget finalization margin.
+- Add compact status, per-run usage analysis and caller-reviewed production measurement.
+  Calibration needs five distinct comparable reviewed production runs, includes failures
+  and retries, excludes diagnostics and uncertain usage, and affects only future plans.
+- Estimates and parallel suggestions are provisional heuristics, not benchmark optima,
+  billing guarantees or permission to raise user budgets. No extra supervisor model.
+- Separate usage cursors per run, record terminal boundaries, retain late child usage
+  with warnings, freeze new terminal run elapsed time and preserve observed worker end time.
+- Keep 0.3.x plans/states compatible and unchanged in policy. Add regression coverage
+  for direct execution, role gates, context contracts, history eligibility and accounting.
+
 ## 0.3.1 — safe reinstallation after preserved harness state
 
 - Permit reinstallation after 0.3.0 uninstall kept an unchanged

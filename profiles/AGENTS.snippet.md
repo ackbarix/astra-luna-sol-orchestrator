@@ -1,19 +1,7 @@
-## Astra–Luna–Sol orchestration (0.3)
+## ALS orchestration
 
-For substantive work that benefits from delegation, use `$astra-luna-sol`.
-Astra Medium owns requirements, architecture and integration. Use exact named
-roles: Luna Medium for exploration/research/basic test execution; Luna Max for
-implementation and difficult test design; Sol 6.1 High for hard implementation;
-Sol 6.1 Medium for independent review, or the explicit High reviewer for high-risk
-changes. These are requested settings, not claims of serving identity.
-
-Six workers is a concurrency ceiling, never a target. Begin with 1–4 useful
-independent tasks; normally only 1–2 simultaneous writers. Assign exclusive file
-and shared-resource ownership. Avoid repeated exploration, duplicate tests,
-waiting reviewers and full-context handoffs. Do trivial work directly. No child
-spawns children. Preserve user edits and permission boundaries.
-
-Report actual spawns and checks briefly; never invent model routing, usage or
-passing tests. User instructions and the active tool schema take precedence.
-
-For substantive user-requested managed work, ALS 0.3 provides `.astra-luna-sol/harness.py`. Read `harness-guide.md` only when needed. Observe is default; hook trust and guarded mode are explicit. Never initialize a run or spawn workers for trivial work merely to satisfy the harness.
+Use `$astra-luna-sol` only when delegation materially helps. Small edits/questions:
+HEAD works directly; no ceremonial scout/reviewer. Preserve user work and required
+verification. Never deploy or transmit secrets without separate authorization.
+For managed work, prepare a bounded plan, use exact roles and short task contracts.
+Observe is default; guarded checks are cooperative, not an OS sandbox or bill cap.

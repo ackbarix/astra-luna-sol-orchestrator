@@ -24,7 +24,7 @@ from als_harness import integration as hook_config
 ROOT = Path(__file__).resolve().parent
 START, END = "<!-- ALS:BEGIN -->", "<!-- ALS:END -->"
 CONFIG, AGENTS, MANIFEST = ".codex/config.toml", "AGENTS.md", ".astra-luna-sol/manifest.json"
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 HOOKS = ".codex/hooks.json"
 
 
@@ -115,6 +115,7 @@ def sources() -> dict[str, Path]:
     out[".astra-luna-sol/harness.py"] = ROOT / "scripts/harness.py"
     out[".astra-luna-sol/.gitignore"] = ROOT / "profiles/runtime.gitignore"
     out[".astra-luna-sol/harness-guide.md"] = ROOT / "docs/harness.md"
+    out[".astra-luna-sol/efficiency-guide.md"] = ROOT / "docs/efficiency.md"
     for module in sorted((ROOT / "als_harness").glob("*.py")):
         out[".astra-luna-sol/als_harness/" + module.name] = module
     return out
@@ -280,7 +281,7 @@ def main(argv=None) -> int:
         print("DRY RUN: nothing written, no Codex/OpenCodex calls")
         return 0
     commit(target, plan, snapshots)
-    print("UNINSTALL OK" if args.uninstall else "INSTALL OK 0.3.1: run codex; review /hooks before managing a run (observe default)")
+    print("UNINSTALL OK" if args.uninstall else "INSTALL OK 0.4.0: run codex; review /hooks before managing a run (observe default)")
     return 0
 
 

@@ -5,6 +5,7 @@ import re
 import uuid
 from .common import ACTIVE, TERMINAL, ROLES, HarnessError, digest, ident, now, overlap, relative, checked_path
 from .snapshot import capture
+from . import efficiency
 
 
 def validate_plan(plan):
@@ -64,6 +65,7 @@ def validate_plan(plan):
     for key in ('tokens','seconds'):
         b.setdefault(key,0)
         if type(b[key]) is not int or b[key] < 0: raise HarnessError('Invalid budget')
+    efficiency.validate(p)
     return p
 
 
@@ -98,8 +100,15 @@ class Engine:
         import json
         confirmed = sum(json.loads(row['doc'])['usage']['input_tokens'] + json.loads(row['doc'])['usage']['output_tokens'] for row in rows)
         active = [t for t in self.s.tasks(run['id']) if t['status'] in ACTIVE]
-        reserved = sum(t['estimate_tokens'] for t in active)
-        seconds = max(0,now()-run['created'])
+        # Consume estimates as confirmed worker usage arrives, avoiding double
+        # reservation of the same already-accounted responses.
+        by_thread = {}
+        for row in self.s.db.execute('SELECT thread,doc FROM usage WHERE run=?',(run['id'],)):
+            u=json.loads(row['doc'])['usage']
+            by_thread[row['thread']]=by_thread.get(row['thread'],0)+u['input_tokens']+u['output_tokens']
+        reserved = sum(max(0,t['estimate_tokens']-by_thread.get(t['attempts'][-1].get('thread_id'),0))
+                       for t in active if t.get('attempts') and t.get('executor')!='head')
+        seconds = max(0,run.get('closed_at',now())-run['created'])
         b = run['plan']['budget']
         fractions = ([confirmed/b['tokens']] if b['tokens'] else []) + ([seconds/b['seconds']] if b['seconds'] else [])
         fraction = max(fractions, default=0)
@@ -109,7 +118,7 @@ class Engine:
                 'unmeasured_inflight':any(not t['estimate_tokens'] for t in active),
                 'usage_is_lower_bound':True, 'hard_billing_limit':False}
 
-    def reserve(self, rid, tid, call_id, role=None, requested=None):
+    def reserve(self, rid, tid, call_id, role=None, requested=None, as_head=False):
         ident(call_id)
         with self.s.tx():
             run, task = self.s.run(rid), self.s.task(rid,tid)
@@ -119,6 +128,13 @@ class Engine:
                 return {'allowed':ok,'duplicate':True,'attempt':prior['number'],
                         'reasons':[] if ok else ['completed call ID cannot be dispatched again']}
             reasons = []
+            is_head = task.get('executor') == 'head'
+            if as_head and (not is_head or not run['plan'].get('efficiency')):
+                reasons.append('begin-head requires a task assigned to HEAD')
+            if not as_head:
+                reasons.extend(efficiency.admission(run['plan'],task,self.s.tasks(rid),requested))
+            if run['plan'].get('efficiency'):
+                for path in task.get('context_files',[]): checked_path(self.s.project,path)
             for path in task['write_paths']:
                 checked_path(self.s.project, path)
             if run['status'] != 'running': reasons.append('run is not running')
@@ -131,9 +147,13 @@ class Engine:
             if any(self.s.task(rid,d)['status'] != 'completed' for d in task['depends_on']): reasons.append('dependency not completed')
             all_tasks = self.s.tasks()
             held = [t for t in all_tasks if t['status'] in ACTIVE or (t['status']=='awaiting_validation' and t.get('claims_held'))]
-            active = [t for t in all_tasks if t['run']==rid and t['status'] in ACTIVE]
-            if len(active) >= 6: reasons.append('six-child capacity reached')
-            if task['write_paths'] and sum(bool(t['write_paths']) for t in held) >= 2: reasons.append('two-writer capacity reached')
+            active = [t for t in all_tasks if t['run']==rid and t['status'] in ACTIVE and t.get('executor')!='head']
+            policy=run['plan'].get('efficiency',{})
+            max_children=policy.get('max_concurrent',6)
+            if not as_head and len(active)>=max_children:
+                reasons.append('six-child capacity reached' if max_children==6 else 'optimized concurrent worker limit reached')
+            if task['write_paths'] and sum(bool(t['write_paths']) for t in held) >= policy.get('max_writers',2):
+                reasons.append('two-writer capacity reached' if policy.get('max_writers',2)==2 else 'high-risk single-writer limit reached')
             for other in held:
                 if any(overlap(a,b) for a in task['write_paths'] for b in other['write_paths']) or set(task['resources']) & set(other['resources']):
                     reasons.append('resource owned by '+other['run']+'/'+other['id'])
@@ -142,7 +162,10 @@ class Engine:
             if b['stage']=='stop_new_work': reasons.append('soft budget reached')
             if b['stage']=='reduce_parallelism' and active: reasons.append('90% budget: serialize new work')
             cap = b['limits']['tokens']
-            if cap and task['estimate_tokens'] and b['confirmed_tokens']+b['reserved_estimate']+task['estimate_tokens'] > cap:
+            finalization=(cap*policy.get('finalization_reserve_percent',0)+99)//100 if cap else 0
+            if cap and policy and not as_head and not task['estimate_tokens']:
+                reasons.append('set a worker estimate before using an explicit soft budget')
+            if cap and not as_head and task['estimate_tokens'] and b['confirmed_tokens']+b['reserved_estimate']+task['estimate_tokens']+finalization > cap:
                 reasons.append('reservation estimate exceeds remaining soft budget')
             if reasons:
                 self.s.event('reject:'+rid+':'+call_id,rid,'reservation_rejected',{'task':tid,'reasons':reasons})
@@ -150,10 +173,21 @@ class Engine:
             a = {'number':len(task['attempts'])+1,'call_id':call_id,'thread_id':None,'started':now(),
                  'role':task['role'],'requested_model':ROLES[task['role']][0],'requested_effort':ROLES[task['role']][1],
                  'status':'reserved','ended':None}
-            task['attempts'].append(a); task['status']='reserved'; task['claims_held']=True
+            if as_head:
+                a.update(executor='head',requested_model='gpt-6-astra',requested_effort='medium',status='running')
+            elif requested is not None:
+                message=requested.get('message',requested.get('prompt',''))
+                a['context']={'message_chars':len(message) if isinstance(message,str) else None,
+                              'message_sha256':digest(message.encode()) if isinstance(message,str) else None,
+                              'fork_context':requested.get('fork_context','not_exposed_or_unspecified')}
+            task['attempts'].append(a); task['status']=a['status']; task['claims_held']=True
             self.s.save_task(task)
             self.s.event('reserve:'+rid+':'+call_id,rid,'task_reserved',{'task':tid,'attempt':a['number']})
             return {'allowed':True,'attempt':a['number']}
+
+    def begin_head(self,rid,tid):
+        # Resource admission without spawning or pretending a child exists.
+        return self.reserve(rid,tid,'head-'+uuid.uuid4().hex,as_head=True)
 
     def bind(self, rid, call_id, thread):
         ident(thread)
@@ -188,10 +222,10 @@ class Engine:
             run,t = self.s.run(rid), self.s.task(rid,tid)
             if run['status'] in TERMINAL: raise HarnessError('Run is terminal')
             if not t['attempts'] or t['status'] not in ACTIVE | {'awaiting_validation'}: raise HarnessError('Task is not in progress')
-            if t['status'] in ACTIVE and not stopped: raise HarnessError('Confirm worker stopped before releasing its claims')
+            if t['status'] in ACTIVE and not stopped and t.get('executor')!='head': raise HarnessError('Confirm worker stopped before releasing its claims')
             t['status']='failed' if failed else 'awaiting_validation'; t['claims_held']=False
             t['result']={'note':note,'snapshot':snapshot['digest'],'basis':'caller_reported','stamp':now()}
-            a=t['attempts'][-1]; a['status']=t['status']; a['ended']=now()
+            a=t['attempts'][-1]; a['status']=t['status']; a['ended']=a.get('ended') or now(); a['result_recorded_at']=now()
             if failed: a['failure']=digest({'code':error_code,'snapshot':snapshot['digest']})
             self.s.save_task(t)
 
@@ -207,6 +241,7 @@ class Engine:
                     raise HarnessError('Missing current passing task check: '+key)
             # Acceptance records HEAD judgment, not objective model quality.
             t['status']='completed';t['claims_held']=False;t['accepted_snapshot']=snap
+            if t['attempts']:t['attempts'][-1]['status']='completed'
             self.s.save_task(t)
 
     def retry(self, rid, tid, approach, role=None):
@@ -219,9 +254,13 @@ class Engine:
             if len(failures)>=2 and failures[-1]==failures[-2]: raise HarnessError('Repeated failure without code progress; automatic retry refused')
             if any(a.get('next_approach')==approach for a in t['attempts']): raise HarnessError('Identical retry approach')
             if role and role not in ROLES: raise HarnessError('Unknown retry role')
+            if r['plan'].get('efficiency') and role and t.get('risk')=='high' and role not in {'als_hard_worker','als_reviewer_deep'}:
+                raise HarnessError('High-risk retry cannot be downgraded to a light role')
             if role and t['write_paths'] and not ROLES[role][2]: raise HarnessError('Read-only retry cannot inherit write ownership')
             t['attempts'][-1]['next_approach']=approach
-            if role: t['role']=role
+            if role:
+                t['role']=role
+                if r['plan'].get('efficiency'):t['role_override_reason']=approach[:500]
             t['status']='pending';self.s.save_task(t)
             # No spawn or external action occurs here.
 
@@ -267,7 +306,9 @@ class Engine:
             issues=self.problems(r,snap)
             r['completion_requested']=bool(issues);r['completion_problems']=issues
             r['status']='running' if issues else 'completed'
-            if not issues:r['completed_snapshot']=snap
+            if not issues:
+                r['completed_snapshot']=snap
+                r.setdefault('closed_at',now())
             self.s.save_run(r)
             return {'completed':not issues,'problems':issues}
 
@@ -276,6 +317,7 @@ class Engine:
             r=self.s.run(rid)
             if r['status'] in TERMINAL:return
             r['status']='cancelled' if cancel else 'paused';r['pause_reason']=reason[:1000];r['completion_requested']=False
+            if cancel:r.setdefault('closed_at',now())
             r['checkpoint']=r.get('last_snapshot',r['baseline']['digest'])
             for t in self.s.tasks(rid):
                 if t['status'] in ACTIVE:

@@ -26,12 +26,16 @@ def sync_path(store,run,path):
         raise HarnessError('Usage path must be a JSONL rollout beneath CODEX_HOME/sessions')
     if any(x.is_symlink() for x in p.parents if x!=base and base in x.parents):
         raise HarnessError('Symlinked rollout parent')
-    stat=p.stat(); old=store.get('cursors',str(p),'path') or {}
+    cursor_key=str(p)+'#als-run='+run['id']
+    stat=p.stat(); old=store.get('cursors',cursor_key,'path') or {}
     key=[stat.st_dev,stat.st_ino]
     if old.get('file_key')!=key or stat.st_size<old.get('offset',0):
         cursor={'file_key':key,'offset':0,'context':{},'contexts':{},'meta':None}
     else:cursor=old
     offset=cursor['offset']; consumed=0; events=[]; notes=[]
+    known={run.get('session')}|{a.get('thread_id') for t in store.tasks(run['id']) for a in t['attempts']}
+    if run.get('status') in {'completed','cancelled'} and not run.get('closed_at'):
+        notes.append('legacy run has no terminal timestamp; post-run usage boundary unverified')
     with p.open('rb') as f:
         f.seek(offset)
         while consumed<1024*1024:
@@ -47,7 +51,6 @@ def sync_path(store,run,path):
             data=o['payload'];kind=o.get('type')
             if kind=='session_meta':cursor['meta']=data;continue
             meta=cursor.get('meta') or {};thread=meta.get('id')
-            known={run.get('session')}|{a.get('thread_id') for t in store.tasks(run['id']) for a in t['attempts']}
             if thread not in known or not thread:
                 notes.append('unbound thread; usage excluded');continue
             if kind=='turn_context':
@@ -61,6 +64,9 @@ def sync_path(store,run,path):
                 if not stamp:
                     notes.append('missing usage timestamp; excluded');continue
                 if stamp.timestamp()<run['created']:continue
+                if run.get('closed_at') and stamp.timestamp()>run['closed_at']:
+                    if thread==run.get('session'):continue
+                    notes.append('linked child response after run closure; cancellation did not stop live work')
                 warnings=[]; usage=normalizer().normalized_usage(data.get('usage'),warnings)
                 notes.extend(warnings)
                 if usage is None:continue
@@ -80,7 +86,7 @@ def sync_path(store,run,path):
             previous=store.db.execute('SELECT doc FROM usage WHERE run=? AND thread=? AND response=?',(run['id'],thread,response)).fetchone()
             if previous and previous['doc']!=encoded(event):notes.append('conflicting response ID; first record retained')
             store.db.execute('INSERT OR IGNORE INTO usage VALUES(?,?,?,?)',(run['id'],thread,response,encoded(event)))
-        store.db.execute('INSERT INTO cursors VALUES(?,?) ON CONFLICT(path) DO UPDATE SET doc=excluded.doc',(str(p),encoded(cursor)))
+        store.db.execute('INSERT INTO cursors VALUES(?,?) ON CONFLICT(path) DO UPDATE SET doc=excluded.doc',(cursor_key,encoded(cursor)))
         r=store.run(run['id'])
         r['warnings']=sorted(set(r['warnings'])|set(notes))[:100]
         if cursor.get('has_cumulative') and not store.db.execute('SELECT 1 FROM usage WHERE run=? LIMIT 1',(run['id'],)).fetchone():

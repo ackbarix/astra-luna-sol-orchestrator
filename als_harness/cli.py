@@ -9,9 +9,9 @@ import sqlite3
 import subprocess
 import sys
 from .common import HarnessError, checked_path, redact
-from .engine import Engine
+from .engine import Engine, validate_plan
 from .state import Store
-from . import hooks, integration, report, usage, verify
+from . import hooks, integration, report, usage, verify, efficiency, telemetry
 
 
 def doctor(project,store,probe=False):
@@ -51,7 +51,18 @@ def parser():
     start.add_argument('--ack-hook-limits',action='store_true')
     d=sub.add_parser('doctor');d.add_argument('--probe',action='store_true')
     sub.add_parser('hook')
-    status=sub.add_parser('status');status.add_argument('--run')
+    status=sub.add_parser('status');status.add_argument('--run');status.add_argument('--compact',action='store_true')
+    prep=sub.add_parser('prepare');prep.add_argument('--plan',type=Path,required=True)
+    prep.add_argument('--profile',choices=sorted(efficiency.PROFILES),default='balanced')
+    prep.add_argument('--use-history',action='store_true')
+    ana=sub.add_parser('analyze')
+    choice=ana.add_mutually_exclusive_group();choice.add_argument('--run');choice.add_argument('--report-file',type=Path)
+    ana.add_argument('--workload',default='unspecified')
+    for name in ('task-message','begin-head'):
+        q=sub.add_parser(name);q.add_argument('--run',required=True);q.add_argument('--task',required=True)
+    measure=sub.add_parser('measure');measure.add_argument('--run',required=True)
+    measure.add_argument('--workload',required=True);measure.add_argument('--quality',choices=['pass','fail'],required=True)
+    measure.add_argument('--ack-recorded-only',action='store_true');measure.add_argument('--elapsed-seconds',type=float)
     for name in ('complete','sync-usage','report','verify','pause','cancel','resume','reserve','bind','finish','accept','retry','assess'):
         q=sub.add_parser(name);q.add_argument('--run',required=True)
         if name in ('reserve','finish','accept','retry'):q.add_argument('--task',required=True)
@@ -65,8 +76,7 @@ def parser():
         if name in ('pause','cancel'):q.add_argument('--reason',required=True)
         if name=='resume':
             q.add_argument('--accept-drift',action='store_true');q.add_argument('--workers-stopped',action='store_true');q.add_argument('--session')
-        if name=='assess':
-            q.add_argument('--criterion',required=True);q.add_argument('--note',required=True);q.add_argument('--actor',required=True)
+        if name=='assess':q.add_argument('--criterion',required=True);q.add_argument('--note',required=True);q.add_argument('--actor',required=True)
         if name=='report':q.add_argument('--format',choices=['json','md'],default='json')
     return p
 
@@ -80,6 +90,27 @@ def main(argv=None):
             if len(data)>1024*1024:raise HarnessError('Oversized hook input')
             payload=json.loads(data)
         project=args.project.resolve(strict=True)
+        if args.cmd in ('prepare','analyze'):
+            # No DB is created just to analyze a report or prepare a plan.
+            exists=(project/'.astra-luna-sol/state/runs.sqlite').is_file()
+            if args.cmd=='prepare':
+                raw=args.plan.read_bytes()
+                if len(raw)>262144:raise HarnessError('Plan file too large')
+                plan=json.loads(raw)
+                if args.use_history and exists:store=Store(project)
+                history=telemetry.history(store,plan.get('workload','unspecified')) if args.use_history else None
+                out=validate_plan(efficiency.prepare(plan,args.profile,history))
+            elif args.report_file:
+                raw=args.report_file.read_bytes()
+                if len(raw)>4*1024*1024:raise HarnessError('Report file too large')
+                out=telemetry.metrics(json.loads(raw))
+            else:
+                if exists:store=Store(project)
+                if args.run:
+                    if store is None:raise HarnessError('No managed runs registered')
+                    out=telemetry.metrics(report.report(Engine(store),args.run))
+                else:out=telemetry.history(store,args.workload)
+            print(json.dumps(out,ensure_ascii=False,indent=2));return 0
         if args.cmd in ('status','doctor') and not (project/'.astra-luna-sol/state/runs.sqlite').exists():
             out=doctor(project,None,args.probe) if args.cmd=='doctor' else {'runs':[],'note':'No managed runs registered'}
             print(json.dumps(out,ensure_ascii=False,indent=2));return 0
@@ -93,6 +124,11 @@ def main(argv=None):
         elif args.cmd=='doctor':out=doctor(store.project,store,args.probe)
         elif args.cmd=='status':
             out=report.report(e,args.run) if args.run else {'runs':[{k:r.get(k) for k in ('id','status','session','mode','updated')} for r in store.runs()]}
+        elif args.cmd=='task-message':
+            r=store.run(args.run);t=store.task(args.run,args.task)
+            print(efficiency.build_message(r['plan'],t));return 0
+        elif args.cmd=='begin-head':out=e.begin_head(args.run,args.task);code=0 if out['allowed'] else 3
+        elif args.cmd=='measure':out=telemetry.review_measurement(e,args.run,args.workload,args.quality,args.ack_recorded_only,args.elapsed_seconds)
         elif args.cmd=='reserve':out=e.reserve(args.run,args.task,args.call_id);code=0 if out['allowed'] else 3
         elif args.cmd=='bind':e.bind(args.run,args.call_id,args.thread);out={'bound':True}
         elif args.cmd=='finish':e.finish(args.run,args.task,args.note,args.failed,args.workers_stopped,args.error_code);out={'recorded':True,'completion_verified':False}
@@ -107,6 +143,7 @@ def main(argv=None):
         elif args.cmd=='report':
             out=report.report(e,args.run)
             if args.format=='md':print(report.markdown(out));return 0
+        if args.cmd=='status' and args.compact and args.run:out=report.compact(out)
         print(json.dumps(out,ensure_ascii=False,indent=2));return code
     except (HarnessError,OSError,ValueError,TypeError,KeyError,sqlite3.Error,subprocess.TimeoutExpired) as ex:
         if args.cmd=='hook':
