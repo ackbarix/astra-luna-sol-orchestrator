@@ -211,9 +211,38 @@ class Store:
         return None
 
     def run_root(self, run):
-        """Worktree a run works in: its recorded worktree, else the project (pre-0.5.1 runs)."""
+        """Worktree a run works in: its recorded worktree, else the project (pre-0.5.1 runs).
+
+        Not validated: use it to compare runs (same root = same files) or to
+        display. Anything that reads or runs code in the worktree must use
+        checked_run_root()."""
         recorded = run.get('worktree') if isinstance(run, dict) else None
         return Path(recorded) if isinstance(recorded, str) and recorded else self.project
+
+    def run_key(self, run):
+        """Resolved run_root() as a string: runs with equal keys share files."""
+        return os.path.realpath(str(self.run_root(run)))
+
+    def checked_run_root(self, run):
+        """run_root() after confirming it is still this repository's worktree.
+
+        The recorded path must exist as a directory and, unless it is the
+        project itself, be the top level of a worktree whose git common dir
+        equals the project's. A removed worktree, or another directory now
+        sitting at that path, raises HarnessError (cancel/status do not need
+        the worktree and keep working)."""
+        root = self.run_root(run)
+        problem = None
+        if not root.is_dir():
+            problem = 'does not exist'
+        elif root.resolve() != self.project.resolve():
+            mine = self.common_dir()
+            if mine is None or git_toplevel(root) != root.resolve() or git_common_dir(root) != mine:
+                problem = 'is no longer a worktree of this repository'
+        if problem:
+            raise HarnessError('Run worktree missing or moved (' + str(root) + ' ' + problem
+                               + '); cancel the run and start a new one from the intended worktree')
+        return root
 
     @contextmanager
     def tx(self):

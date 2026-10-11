@@ -85,10 +85,15 @@ def _write_claim(task):
 
 
 def verify(engine, rid, check_id=None, execute_commands=False):
-    """Run declared checks under the global verification lock.
+    """Run declared checks under the run's worktree verification lock.
 
-    Final verification (no check_id) requires that no non-terminal run has
-    an active worker or a held write claim. A task-level check (check_id)
+    The lock and the gates below only consider runs working in the same
+    resolved worktree (Engine.same_root_runs): runs in other linked
+    worktrees touch different files. The recorded worktree must still be
+    this repository's (Store.checked_run_root), else HarnessError.
+
+    Final verification (no check_id) requires that no non-terminal run in
+    this worktree has an active worker or a held write claim. A task-level check (check_id)
     may run while other work is active, provided THIS run holds no write
     claim: read-only workers anywhere and writers in other runs do not
     block it, and a concurrent code change is still detected by the
@@ -105,16 +110,17 @@ def verify(engine, rid, check_id=None, execute_commands=False):
     before = capture(root)
     ticket = uuid.uuid4().hex
     with s.tx():
-        if engine.live_verifications():
-            raise HarnessError('Another verification owns the worktree')
         run = s.run(rid)
+        if engine.live_verifications(same_as=run):
+            raise HarnessError('Another verification owns the worktree')
+        local = engine.same_root_runs(run)
         if run['status'] != 'running':
             raise HarnessError('Verification requires running run')
         live = engine.live_tasks()
         if check_id:
             if any(_write_claim(t) for t in live if t['run'] == rid):
                 raise HarnessError('Finish or release this run\'s write claims before task-level checks')
-        elif any(t['status'] in ACTIVE or _write_claim(t) for t in live):
+        elif any(t['status'] in ACTIVE or _write_claim(t) for t in live if t['run'] in local):
             raise HarnessError('Stop/finish active workers and release write claims before final checks')
         checks = [c for c in run['plan']['checks'] if not check_id or c['id'] == check_id]
         if not checks:
