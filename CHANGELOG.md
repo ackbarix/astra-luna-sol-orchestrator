@@ -105,6 +105,21 @@
   the missing sessions directory error names the path. `check-runtime.py` works from a global
   install (`smoke-test.txt` beside the script, `$CODEX_HOME/als.config.toml` and `agents/`).
 
+### Round-4 runtime fixes
+- File claims, the writer cap, the final-verify active-worker gate and the verification lock
+  apply per linked worktree; `resources` stay global. A run whose worktree was removed or
+  moved fails with "Run worktree missing or moved (...); cancel the run" and must be cancelled.
+- Session auto-pick skips ended sessions (last event SessionEnd), but they still count, so
+  an ended plus an active session means nothing is picked.
+- `doctor`: when `codex features list` cannot run, feature items are unknown (`ok: null`,
+  `[unk ]`) and never fail doctor; a timeout says "codex did not answer within Ns; raise
+  ALS_DEPS_TIMEOUT". New `harness.py doctor --no-deps`; `status --run ID --format text`.
+- Project-scope SessionStart hints use `als` when it is on PATH, otherwise the absolute
+  interpreter and harness path; the project-scope resume command always uses the absolute
+  form, so it runs from subdirectories and linked worktrees.
+- Fingerprints exclude untracked `__pycache__/` and `*.pyc` files, and checks run with
+  `PYTHONDONTWRITEBYTECODE=1`.
+
 ### Round-3 and round-4 installer and `als` fixes
 - Upgrading a 0.2/0.4 project install records the ALS directories it created, so a later
   uninstall removes them when empty; `[features] hooks = true` is no longer mistaken for

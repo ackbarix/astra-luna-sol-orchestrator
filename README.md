@@ -115,6 +115,8 @@ als version
 
 - `--no-probe`: `codex features list`만 생략하므로 `codex-feature:*` 항목이 빠집니다.
   `git --version`, `codex --version`, `ocx --version`은 그대로 실행합니다(각 `ALS_DEPS_TIMEOUT`초).
+- `codex features list`를 실행할 수 없으면 기능 항목은 알 수 없음(`ok: null`, 텍스트 `[unk ]`)이며
+  doctor를 실패시키지 않습니다. 시간 초과면 `codex did not answer within Ns; raise ALS_DEPS_TIMEOUT`.
 - `--json`: stdout에 객체 하나 `{"deps": {...}, "harness": {...} | null}`. `deps`는
   `{"ok", "items": [{"name", "found", "required", "ok", "hint"}]}`, `harness`는 하네스 doctor의 JSON이며
   저장소 밖이면 `null`, 0.5 미만 프로젝트 설치면 `{"outdated_project_install": VERSION, "message"}`입니다.

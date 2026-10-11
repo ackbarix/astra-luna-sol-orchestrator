@@ -91,6 +91,8 @@ Observe에서도 `complete`는 실패한 검증을 성공으로 인증하지 않
 - `start --plan -`은 stdin에서 계획을 읽습니다.
 - `--session`을 생략하면 `CODEX_THREAD_ID`, 없으면(observe만) **최근 10분 안에 훅 이벤트(종류
   무관)가 있었던 세션이 정확히 하나**일 때 그 세션을 쓰고, 고른 세션 ID를 항상 경고로 출력합니다.
+  마지막 이벤트가 SessionEnd인(종료된) 세션은 고르지 않지만 개수에는 포함됩니다. 그래서 종료된
+  세션과 활성 세션이 함께 있으면 둘 이상으로 보고 아무것도 고르지 않습니다.
   여러 개이거나 없으면 추측하지 않고 세션 없이 경고와 함께 시작합니다. guarded는 자동 선택하지
   않으므로 `--session`이 필요합니다.
 - `prepare`를 거치지 않은 초안(`role` 없는 task, `efficiency` 없음)은 `plan not prepared` 오류와 함께
@@ -100,6 +102,11 @@ Observe에서도 `complete`는 실패한 검증을 성공으로 인증하지 않
   위치(cwd), 증거 최신성은 그 워크트리 기준이므로 메인 체크아웃의 변경은 이 run의 증거를 무효화하지
   않습니다. 같은 저장소의 어느 워크트리에서 온 훅 이벤트(SessionStart, PreToolUse, Stop 등)도
   처리합니다. 0.5.0 이전 run(필드 없음)은 메인 저장소를 씁니다.
+  파일 claim(`write_paths` 겹침), 작성자 상한, 최종 검사의 활성 워커 조건, 검증 잠금은 **같은
+  워크트리의 run끼리만** 비교합니다. 다른 연결 워크트리의 run은 같은 파일을 claim해도 충돌하지
+  않습니다. `resources`(포트·DB 등)는 워크트리와 무관하게 전역입니다. run의 워크트리가 삭제되거나
+  옮겨지면 `Run worktree missing or moved (...); cancel the run ...` 오류가 나므로 그 run은 `cancel`하세요
+  (`cancel`·`status`·`finish`는 계속 동작).
 - 계획에는 런타임 전용 task 키(상태·시도 기록 등)를 넣을 수 없습니다. `.git`, `.astra-luna-sol`,
   `.codex` 아래는 작업 소유 경로로 예약되어 있습니다.
 - `0` 예산은 미설정입니다. 토큰 예산은 **비캐시 입력 + 출력** 기준 소프트 예산이며 청구액이 아닙니다.
@@ -150,8 +157,11 @@ als complete --run RUN_ID
 - resume은 코드가 `last_snapshot`과 다를 때만 `--accept-drift`를 요구합니다. `verify`가 끝날 때마다
   `last_snapshot`을 갱신하므로, 검증 후 손대지 않았다면 보통 필요 없습니다. checkout/reset/stash/commit은
   하지 않습니다. 취소·완료된 run은 재개할 수 없습니다.
-- Codex SessionEnd는 run을 자동 pause합니다. 다음 SessionStart 안내에 정확한 resume 명령
-  (전역: `als resume --run ... --session ...`)이 표시되지만 자동 실행하지 않습니다.
+- Codex SessionEnd는 run을 자동 pause합니다. 다음 SessionStart 안내에 정확한 resume 명령이
+  표시되지만 자동 실행하지 않습니다. 전역 범위는 `als resume --run ... --session ...`, 프로젝트 범위는
+  실행 중인 인터프리터와 하네스의 절대 경로(`/usr/bin/python3 /repo/.astra-luna-sol/harness.py
+  --project /repo resume ...`)라 하위 디렉터리·워크트리에서도 그대로 실행됩니다. 그 밖의 SessionStart
+  안내는 전역 범위이거나 `als`가 PATH에 있으면 `als ...`, 아니면 같은 절대 경로 형태를 씁니다.
 - retry는 새 모델을 실행하지 않습니다. 최초 포함 3회, 코드 진척 없는 반복 실패·동일 설명은 거절하고,
   고위험 task를 경량 역할로 낮추거나 읽기 전용 역할에 쓰기 소유를 넘기지 않습니다.
 
@@ -160,14 +170,16 @@ als complete --run RUN_ID
 `verify --execute`는 종료 코드·시간초과·로그 해시·코드 fingerprint를 기록합니다. 검사 중 코드가
 바뀌면 실패로 기록하고 이후 검사를 멈춥니다. 로그는 로컬 0600, 64KiB 제한이며 알려진 비밀 형태를
 마스킹하지만 완전한 제거를 보장하지 않습니다. 통과해도 모든 버그가 없다는 뜻은 아닙니다.
+fingerprint는 추적되지 않는 `__pycache__/`와 `*.pyc`/`*.pyo` 파일을 제외하고(추적 중인 바이트코드는
+포함), 검사는 `PYTHONDONTWRITEBYTECODE=1`로 실행합니다.
 
-- **전역 검증 잠금:** 한 번에 하나의 verify만 워크트리를 소유합니다. 잠금에는 verify 프로세스
+- **워크트리별 검증 잠금:** 워크트리마다 한 번에 하나의 verify만 그 워크트리를 소유합니다. 잠금에는 verify 프로세스
   PID·시작 시각·부팅 ID와 실행 중인 검사의 프로세스 그룹이 기록됩니다. 프로세스가 사라졌거나
   PID가 재사용됐거나 재부팅된 잠금은 **stale**로 판단해 다음 verify/complete/resume 때 자동 해제하고
   `verification_lock_cleared` 이벤트를 남깁니다. 시작 시각이 없는 0.4 잠금은 검사 timeout(모르면
   3600초)+60초가 지나면 stale입니다. 검사 프로세스 그룹은 리더를 회수하기 전에 종료합니다.
 - verify가 도는 중 run이 pause/cancel되면 그 결과는 증거로 채택되지 않습니다.
-- **최종 검사**(`--check` 없음): 어떤 미완료 run에도 활성 워커나 쓰기 claim이 없어야 합니다.
+- **최종 검사**(`--check` 없음): 같은 워크트리의 어떤 미완료 run에도 활성 워커나 쓰기 claim이 없어야 합니다.
 - **task 검사**(`--check ID`): **이 run**이 쓰기 claim을 갖고 있지 않으면 됩니다. 다른 run의 작성자나
   읽기 전용 워커가 활동 중이어도 실행되며, 동시 코드 변경은 전후 fingerprint로 실패 처리됩니다.
 
@@ -222,7 +234,7 @@ als usage --latest                      # 선택 옵션이 없으면 als usage�
 | `git` | 없음/2.5 미만. 포크된 워커의 `git worktree`와 훅의 저장소 탐색에 필요 |
 | `sqlite3` | Python에 sqlite3 모듈 없음. 전체 Python 빌드를 설치 |
 | `codex` | `npm i -g @openai/codex` 후 PATH 확인 |
-| `codex-feature:hooks` / `codex-feature:multi_agent` | `codex features enable hooks` / `codex features enable multi_agent` (`--no-probe`면 생략) |
+| `codex-feature:hooks` / `codex-feature:multi_agent` | `codex features enable hooks` / `codex features enable multi_agent` (`--no-probe`면 생략). `codex features list`를 실행할 수 없으면 알 수 없음(`ok: null`, `[unk ]`)으로 표시하고 doctor를 실패시키지 않으니 직접 확인하세요. 시간 초과면 `codex did not answer within Ns; raise ALS_DEPS_TIMEOUT` |
 | `ocx` (선택) | `run.sh --configure-ocx`에만 필요 |
 | `als-on-path` (선택) | `export PATH="$HOME/.local/bin:$PATH"`를 셸 프로필에 추가 |
 | `conflict:agent-roles` (선택) | 프로젝트 `.codex/agents/als_*.toml`이 전역 역할을 가림. `als uninstall` 또는 `als uninstall --global`로 하나만 유지 |
