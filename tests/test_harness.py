@@ -195,7 +195,8 @@ class HarnessTests(unittest.TestCase):
     def test_cli_full_head_only_flow(self):
         plan=self.project/'plan.json';plan.write_text(json.dumps(self.plan()))
         script=Path(__file__).resolve().parents[1]/'scripts/harness.py'
-        def call(*args):return subprocess.run([sys.executable,str(script),'--project',str(self.project),*args],capture_output=True,text=True)
+        env={**os.environ,'ALS_STATE_HOME':str(Path(self.tmp.name)/'als-state')}  # repo script runs in global scope
+        def call(*args):return subprocess.run([sys.executable,str(script),'--project',str(self.project),*args],capture_output=True,text=True,env=env)
         s=call('start','--plan',str(plan));self.assertEqual(s.returncode,0,s.stderr);rid=json.loads(s.stdout)['run']
         self.assertEqual(call('complete','--run',rid).returncode,3)
         self.assertEqual(call('verify','--run',rid,'--execute').returncode,0)

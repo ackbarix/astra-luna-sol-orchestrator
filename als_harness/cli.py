@@ -1,156 +1,525 @@
 """User/HEAD CLI; no model dispatch, implicit retries or background processes."""
 from __future__ import annotations
 import argparse
+import inspect
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
-from .common import HarnessError, checked_path, redact
+import time
+from .common import HarnessError, checked_path, now, redact
 from .engine import Engine, validate_plan
 from .state import Store
-from . import hooks, integration, report, usage, verify, efficiency, telemetry
+from . import state, hooks, report, usage, verify, efficiency, telemetry
+
+try:
+    from . import deps  # COMPAT(0.5 installer branch): provided by als_harness/deps.py
+except ImportError:
+    deps = None
+
+# Directory holding this harness (als_harness/ and harness.py when installed).
+HOME = Path(__file__).resolve().parents[1]
+DOCTOR_EVENTS = ('SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd')
+RECENT_SESSION_SECONDS = 600
 
 
-def doctor(project,store,probe=False):
-    issues=[];installed=False
+def detect_scope(home=HOME):
+    """'project' when running from <project>/.astra-luna-sol/harness.py, else 'global'."""
+    if home.name == '.astra-luna-sol' and (home / 'harness.py').is_file():
+        return 'project'
+    return 'global'
+
+
+def git_project(cwd):
+    """Main project for a directory: git common dir's parent, so forked worktrees map home.
+
+    Portable to old git: no --path-format (git >= 2.31); relative output is resolved here.
+    """
+    cwd = Path(cwd).resolve()
+
+    def rev_parse(flag):
+        try:
+            done = subprocess.run(['git', '-C', str(cwd), 'rev-parse', flag],
+                                  capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        value = done.stdout.strip()
+        return value if done.returncode == 0 and value else None
+    top = rev_parse('--show-toplevel')
+    common = rev_parse('--git-common-dir')
+    if common is not None:
+        # Relative output is relative to cwd; very old git printed it relative to the top level.
+        candidates = [cwd / common] + ([Path(top) / common] if top else [])
+        for candidate in candidates:
+            candidate = candidate.resolve()
+            if candidate.name == '.git' and candidate.is_dir():
+                return candidate.parent
+    return Path(top).resolve() if top and Path(top).is_dir() else None
+
+
+NOT_A_PROJECT = ('Not inside a git project. Next: cd into the project (any subdirectory or worktree)'
+                 ' or pass --project <path>.')
+
+
+def resolve_project(args, scope, payload=None):
+    """--project wins (legacy hooks); project scope owns its parent; global uses cwd/git."""
+    if args.project is not None:
+        return args.project.resolve(strict=True)
+    if scope == 'project':
+        return HOME.parent.resolve(strict=True)
+    if args.cmd == 'hook':
+        cwd = payload.get('cwd') if isinstance(payload, dict) else None
+        if not isinstance(cwd, str) or not cwd or not Path(cwd).is_dir():
+            return None
+        return git_project(Path(cwd))
+    found = git_project(Path.cwd())
+    if found is None:
+        raise HarnessError(NOT_A_PROJECT)
+    return found
+
+
+def supports_scope(func):
     try:
-        raw=checked_path(project,'.codex/hooks.json').read_bytes()
-        doc=integration.parse(raw)
-        installed=all(g in doc.get('hooks',{}).get(e,[]) for e,g in integration.groups(project).items())
-        if not installed:issues.append('ALS hooks missing or customized; review /hooks')
-    except (OSError,HarnessError):issues.append('Project hooks not installed/readable')
-    observed={}
-    for row in (store.db.execute('SELECT id,doc FROM sessions ORDER BY rowid DESC LIMIT 8') if store else []):
-        observed[row['id']]=json.loads(row['doc']).get('seen',[])
-    result={'hooks_configured':installed,'observed_events_by_session':observed,'issues':issues,
-            'paid_model_calls':False,'hook_trust_verified':False,'blocking_behavior_verified':False,
-            'note':'Review/trust with /hooks. Observed callbacks and fixtures are not an end-to-end proof of installed Codex enforcement.'}
+        return 'scope' in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def state_path(project, scope):
+    # COMPAT(0.5 engine branch): drop the fallback once state.locate takes scope.
+    if supports_scope(state.locate):
+        return state.locate(project, scope=scope)
+    return state.locate(project)
+
+
+def open_store(project, scope):
+    # COMPAT(0.5 engine branch): drop the fallback once Store takes scope.
+    if supports_scope(Store):
+        return Store(project, scope=scope)
+    return Store(project)
+
+
+def default_session(store, mode):
+    """--session default. CODEX_THREAD_ID is not set by Codex 0.162, so fall back to
+    exactly one SessionStart receipt from the last 10 minutes; never guess between several."""
+    env = os.environ.get('CODEX_THREAD_ID')
+    if env:
+        return env, 'CODEX_THREAD_ID', None
+    cutoff = now() - RECENT_SESSION_SECONDS
+    recent = []
+    for row in store.db.execute('SELECT id,doc FROM sessions'):
+        started = json.loads(row['doc']).get('session_start_at')
+        if isinstance(started, (int, float)) and started >= cutoff:
+            recent.append(row['id'])
+    if len(recent) == 1:
+        return recent[0], 'recent_session_start', None
+    problem = ('No --session given and ' + str(len(recent))
+               + ' SessionStart receipts in the last 10 minutes; cannot pick the session safely.')
+    if mode == 'guarded':
+        raise HarnessError(problem + ' Guarded mode requires --session <session id>.')
+    return None, None, problem + ' Observe run started without a session; usage/hook linkage disabled.'
+
+
+def hooks_file(project, scope):
+    if scope == 'project':
+        return checked_path(project, '.codex/hooks.json')
+    return Path(os.environ.get('CODEX_HOME') or '~/.codex').expanduser() / 'hooks.json'
+
+
+def als_command(handler):
+    command = handler.get('command') if isinstance(handler, dict) else None
+    return isinstance(command, str) and 'harness.py' in command and re.search(r'\shook(\s|$)', command) is not None
+
+
+def missing_events(doc):
+    configured = doc.get('hooks') if isinstance(doc, dict) else None
+    if not isinstance(configured, dict):
+        return list(DOCTOR_EVENTS)
+    missing = []
+    for event in DOCTOR_EVENTS:
+        groups = configured.get(event)
+        groups = groups if isinstance(groups, list) else []
+        if not any(isinstance(g, dict) and isinstance(g.get('hooks'), list) and any(als_command(h) for h in g['hooks'])
+                   for g in groups):
+            missing.append(event)
+    return missing
+
+
+def dependency_report(project):
+    if deps is None:
+        return {'ok': None, 'items': [], 'note': 'dependency checker unavailable in this install'}
+    try:
+        return deps.check(project)
+    except Exception as ex:  # a broken checker must not hide the rest of doctor
+        return {'ok': None, 'items': [], 'note': 'dependency check failed: ' + type(ex).__name__}
+
+
+def doctor_text(result):
+    lines = ['ALS doctor (' + result['scope'] + ' scope)',
+             'state:  ' + result['state_path'],
+             'hooks:  ' + ('configured' if result['hooks_configured'] else 'NOT configured')
+             + ' (' + str(result.get('hooks_file')) + ')']
+    failing = ['FAIL ' + issue for issue in result['issues']]
+    for item in result.get('deps', {}).get('items', []):
+        if not item.get('ok'):
+            failing.append('FAIL ' + str(item.get('name')) + ': found ' + str(item.get('found'))
+                           + ', need ' + str(item.get('required')) + ' -> ' + str(item.get('hint') or ''))
+    if result.get('deps', {}).get('ok') is None:
+        lines.append('deps:   not checked (' + str(result.get('deps', {}).get('note')) + ')')
+    lines.append('summary: ' + ('all checks passed' if not failing else str(len(failing)) + ' problem(s)'))
+    return '\n'.join(lines + failing)
+
+
+def doctor(project, store, probe=False, scope='project'):
+    issues = []
+    installed = False
+    missing = list(DOCTOR_EVENTS)
+    path = None
+    try:
+        path = hooks_file(project, scope)
+        doc = json.loads(path.read_bytes())
+        missing = missing_events(doc)
+        installed = not missing
+        if not installed:
+            issues.append('ALS hook handler missing for ' + ', '.join(missing)
+                          + ' -> reinstall ALS hooks, then review /hooks in Codex')
+    except (OSError, ValueError, HarnessError):
+        issues.append('Hooks file not installed/readable -> install ALS hooks, or use the CLI without hooks')
+    observed = {}
+    rows = store.db.execute('SELECT id,doc FROM sessions ORDER BY rowid DESC LIMIT 8') if store else []
+    for row in rows:
+        observed[row['id']] = json.loads(row['doc']).get('seen', [])
+    result = {'hooks_configured': installed, 'hook_events_missing': missing, 'scope': scope,
+              'hooks_file': str(path) if path else None, 'state_path': str(state_path(project, scope)),
+              'observed_events_by_session': observed, 'issues': issues,
+              'paid_model_calls': False, 'hook_trust_verified': False, 'blocking_behavior_verified': False,
+              'note': 'Review/trust with /hooks. Observed callbacks and fixtures are not an end-to-end proof'
+                      ' of installed Codex enforcement.'}
+    result['deps'] = dependency_report(project)
     if probe:
-        result['probes']={}
-        for key,cmd in {'version':['codex','--version'],'features':['codex','features','list']}.items():
-            if not shutil.which(cmd[0]):result['issues'].append('codex not found');continue
+        result['probes'] = {}
+        for key, cmd in {'version': ['codex', '--version'], 'features': ['codex', 'features', 'list']}.items():
+            if not shutil.which(cmd[0]):
+                result['issues'].append('codex not found')
+                continue
             try:
-                p=subprocess.run(cmd,capture_output=True,text=True,timeout=10)
-                result['probes'][key]={'exit_code':p.returncode,'output':redact(p.stdout[:2000])}
-            except (OSError,subprocess.TimeoutExpired):result['issues'].append(key+' probe failed')
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                result['probes'][key] = {'exit_code': p.returncode, 'output': redact(p.stdout[:2000])}
+            except (OSError, subprocess.TimeoutExpired):
+                result['issues'].append(key + ' probe failed')
     return result
 
 
 def parser():
-    p=argparse.ArgumentParser(description=__doc__)
-    here=Path(__file__).resolve().parents[1]
-    default=here.parent if here.name=='.astra-luna-sol' else Path.cwd()
-    p.add_argument('--project',type=Path,default=default)
-    sub=p.add_subparsers(dest='cmd',required=True)
-    start=sub.add_parser('start');start.add_argument('--plan',type=Path,required=True)
-    start.add_argument('--session',default=os.environ.get('CODEX_THREAD_ID'))
-    start.add_argument('--mode',choices=['observe','guarded'],default='observe')
-    start.add_argument('--ack-hook-limits',action='store_true')
-    d=sub.add_parser('doctor');d.add_argument('--probe',action='store_true')
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--project', type=Path, default=None,
+                   help='Project root. Default: the parent of an installed .astra-luna-sol/ (project scope);'
+                        ' otherwise the main worktree of the current directory (hooks: of the payload cwd).')
+    sub = p.add_subparsers(dest='cmd', required=True)
+    start = sub.add_parser('start')
+    start.add_argument('--plan', type=Path, required=True, help="Plan JSON file, or '-' for stdin.")
+    start.add_argument('--session', default=None,
+                       help='Codex session id. Default: $CODEX_THREAD_ID, else the single SessionStart receipt'
+                            ' from the last 10 minutes. With zero or several, guarded mode refuses and observe'
+                            ' starts without a session (warning).')
+    start.add_argument('--mode', choices=['observe', 'guarded'], default='observe')
+    start.add_argument('--ack-hook-limits', action='store_true')
+    d = sub.add_parser('doctor')
+    d.add_argument('--probe', action='store_true')
+    d.add_argument('--format', choices=['json', 'text'], default='json')
     sub.add_parser('hook')
-    status=sub.add_parser('status');status.add_argument('--run');status.add_argument('--compact',action='store_true')
-    prep=sub.add_parser('prepare');prep.add_argument('--plan',type=Path,required=True)
-    prep.add_argument('--profile',choices=sorted(efficiency.PROFILES),default='balanced')
-    prep.add_argument('--use-history',action='store_true')
-    ana=sub.add_parser('analyze')
-    choice=ana.add_mutually_exclusive_group();choice.add_argument('--run');choice.add_argument('--report-file',type=Path)
-    ana.add_argument('--workload',default='unspecified')
-    for name in ('task-message','begin-head'):
-        q=sub.add_parser(name);q.add_argument('--run',required=True);q.add_argument('--task',required=True)
-    measure=sub.add_parser('measure');measure.add_argument('--run',required=True)
-    measure.add_argument('--workload',required=True);measure.add_argument('--quality',choices=['pass','fail'],required=True)
-    measure.add_argument('--ack-recorded-only',action='store_true');measure.add_argument('--elapsed-seconds',type=float)
-    for name in ('complete','sync-usage','report','verify','pause','cancel','resume','reserve','bind','finish','accept','retry','assess'):
-        q=sub.add_parser(name);q.add_argument('--run',required=True)
-        if name in ('reserve','finish','accept','retry'):q.add_argument('--task',required=True)
-        if name in ('reserve','bind'):q.add_argument('--call-id',required=True)
-        if name=='bind':q.add_argument('--thread',required=True)
-        if name=='finish':
-            q.add_argument('--note',required=True);q.add_argument('--failed',action='store_true')
-            q.add_argument('--workers-stopped',action='store_true');q.add_argument('--error-code',default='work_failure')
-        if name=='retry':q.add_argument('--approach',required=True);q.add_argument('--role')
-        if name=='verify':q.add_argument('--check');q.add_argument('--execute',action='store_true')
-        if name in ('pause','cancel'):q.add_argument('--reason',required=True)
-        if name=='resume':
-            q.add_argument('--accept-drift',action='store_true');q.add_argument('--workers-stopped',action='store_true');q.add_argument('--session')
-        if name=='assess':q.add_argument('--criterion',required=True);q.add_argument('--note',required=True);q.add_argument('--actor',required=True)
-        if name=='report':q.add_argument('--format',choices=['json','md'],default='json')
+    status = sub.add_parser('status', help='Unfinished runs (all with --all), or one run with --run.')
+    status.add_argument('--run')
+    status.add_argument('--all', action='store_true')
+    status.add_argument('--compact', action='store_true')
+    status.add_argument('--format', choices=['json', 'text'], default='json')
+    prep = sub.add_parser('prepare')
+    prep.add_argument('--plan', type=Path, required=True, help="Plan JSON file, or '-' for stdin.")
+    prep.add_argument('--profile', choices=sorted(efficiency.PROFILES), default='balanced')
+    prep.add_argument('--use-history', action='store_true')
+    ana = sub.add_parser('analyze')
+    choice = ana.add_mutually_exclusive_group()
+    choice.add_argument('--run')
+    choice.add_argument('--report-file', type=Path)
+    ana.add_argument('--workload', default='unspecified')
+    for name in ('task-message', 'begin-head'):
+        q = sub.add_parser(name)
+        q.add_argument('--run', required=True)
+        q.add_argument('--task', required=True)
+    measure = sub.add_parser('measure')
+    measure.add_argument('--run', required=True)
+    measure.add_argument('--workload', required=True)
+    measure.add_argument('--quality', choices=['pass', 'fail'], required=True)
+    measure.add_argument('--ack-recorded-only', action='store_true')
+    measure.add_argument('--elapsed-seconds', type=float)
+    for name in ('complete', 'sync-usage', 'report', 'verify', 'pause', 'cancel', 'resume', 'reserve', 'bind',
+                 'finish', 'accept', 'retry', 'assess'):
+        q = sub.add_parser(name)
+        q.add_argument('--run', required=True)
+        if name in ('reserve', 'finish', 'accept', 'retry'):
+            q.add_argument('--task', required=True)
+        if name in ('reserve', 'bind'):
+            q.add_argument('--call-id', required=True)
+        if name == 'bind':
+            q.add_argument('--thread', required=True)
+        if name == 'finish':
+            q.add_argument('--note', required=True)
+            q.add_argument('--failed', action='store_true')
+            q.add_argument('--workers-stopped', action='store_true')
+            q.add_argument('--error-code', default='work_failure')
+        if name == 'retry':
+            q.add_argument('--approach', required=True)
+            q.add_argument('--role')
+        if name == 'verify':
+            q.add_argument('--check')
+            q.add_argument('--execute', action='store_true')
+        if name in ('pause', 'cancel'):
+            q.add_argument('--reason', required=True)
+        if name == 'resume':
+            q.add_argument('--accept-drift', action='store_true')
+            q.add_argument('--workers-stopped', action='store_true')
+            q.add_argument('--session')
+        if name == 'assess':
+            q.add_argument('--criterion', required=True)
+            q.add_argument('--note', required=True)
+            q.add_argument('--actor', required=True)
+        if name == 'report':
+            q.add_argument('--format', choices=['json', 'md'], default='json')
     return p
 
 
+PLAN_LIMIT = 262144
+UNFINISHED = {'completed', 'cancelled'}
+
+
+def read_plan(path):
+    if str(path) == '-':
+        raw = sys.stdin.buffer.read(PLAN_LIMIT + 1)
+    else:
+        raw = path.read_bytes()
+    if len(raw) > PLAN_LIMIT:
+        raise HarnessError('Plan file too large')
+    try:
+        return json.loads(raw)
+    except ValueError as ex:
+        raise HarnessError('Plan is not valid JSON (' + str(ex)[:120] + ').'
+                           ' Next: fix the file, then harness.py prepare --plan <file> to validate it.') from ex
+
+
+def status_rows(store, everything=False):
+    keys = ('id', 'status', 'session', 'mode', 'updated')
+    return [{k: r.get(k) for k in keys} for r in store.runs() if everything or r['status'] not in UNFINISHED]
+
+
+def status_text(out):
+    if 'runs' not in out:
+        return None
+    if not out['runs']:
+        return (out.get('note') or 'No unfinished runs') + '. Next: harness.py start --plan <plan.json>'
+    lines = ['%-16s  %-9s  %-8s  %-20s  %s' % ('RUN', 'STATUS', 'MODE', 'SESSION', 'UPDATED')]
+    for r in out['runs']:
+        updated = r.get('updated')
+        stamp = time.strftime('%Y-%m-%d %H:%M', time.localtime(updated)) if isinstance(updated, (int, float)) else '-'
+        lines.append('%-16s  %-9s  %-8s  %-20s  %s' % (r['id'], r['status'], r.get('mode') or '-',
+                                                       (r.get('session') or '-')[:20], stamp))
+    return '\n'.join(lines)
+
+
+def next_step(args, message):
+    """One concrete follow-up command for common mistakes; None when there is no obvious one."""
+    run = getattr(args, 'run', None) or '<run>'
+    hints = (
+        ('Unknown run', 'harness.py status --all  (lists run ids)'),
+        ('Unknown task', 'harness.py status --run ' + run + '  (lists task ids)'),
+        ('No managed runs', 'harness.py start --plan <plan.json>'),
+        ('Worktree/HEAD differs', 'git status; after reviewing: harness.py resume --run ' + run + ' --accept-drift'),
+        ('Confirm old workers', 'after confirming no worker is still running: harness.py resume --run ' + run
+         + ' --workers-stopped'),
+        ('Confirm worker stopped', 'after confirming the worker stopped: harness.py finish --run ' + run
+         + ' --task <task> --note <result> --workers-stopped'),
+        ('Session already has an unfinished run', 'harness.py status  (then resume or cancel that run)'),
+        ('Guarded mode needs', 'harness.py start --plan <plan.json> --mode observe  (guarded needs real hook'
+         ' receipts and --ack-hook-limits)'),
+        ('Plan file too large', 'shrink the plan below 256 KiB'),
+    )
+    for needle, hint in hints:
+        if needle in message:
+            return hint
+    return None
+
+
+def dispatch(args, store):
+    """Run one state-backed command; returns (output, exit code) or (None, 0) when already printed."""
+    e = Engine(store)
+    code = 0
+    out = None
+    if args.cmd == 'start':
+        plan = read_plan(args.plan)
+        session, source, problem = args.session, 'explicit', None
+        if session is None:
+            session, source, problem = default_session(store, args.mode)
+        out = {'run': e.start(plan, session, args.mode, args.ack_hook_limits), 'models_called': False,
+               'session': session, 'session_source': source}
+        if problem:
+            out['warnings'] = [problem]
+            print('ALS WARNING: ' + problem, file=sys.stderr)
+    elif args.cmd == 'doctor':
+        out = doctor(store.project, store, args.probe, args.scope)
+    elif args.cmd == 'status':
+        if args.run:
+            out = report.report(e, args.run)
+        else:
+            out = {'runs': status_rows(store, args.all)}
+    elif args.cmd == 'task-message':
+        r = store.run(args.run)
+        t = store.task(args.run, args.task)
+        print(efficiency.build_message(r['plan'], t))
+        return None, 0
+    elif args.cmd == 'begin-head':
+        out = e.begin_head(args.run, args.task)
+        code = 0 if out['allowed'] else 3
+    elif args.cmd == 'measure':
+        out = telemetry.review_measurement(e, args.run, args.workload, args.quality, args.ack_recorded_only,
+                                           args.elapsed_seconds)
+    elif args.cmd == 'reserve':
+        out = e.reserve(args.run, args.task, args.call_id)
+        code = 0 if out['allowed'] else 3
+    elif args.cmd == 'bind':
+        out = e.bind(args.run, args.call_id, args.thread) or {'bound': True, 'reason': None}
+        code = 0 if out.get('bound') else 3
+    elif args.cmd == 'finish':
+        e.finish(args.run, args.task, args.note, args.failed, args.workers_stopped, args.error_code)
+        out = {'recorded': True, 'completion_verified': False}
+    elif args.cmd == 'accept':
+        e.accept(args.run, args.task)
+        out = {'accepted': True, 'basis': 'declared_checks_and_HEAD_assessment'}
+    elif args.cmd == 'retry':
+        e.retry(args.run, args.task, args.approach, args.role)
+        out = {'pending': True, 'worker_restarted': False}
+    elif args.cmd == 'verify':
+        out = verify.verify(e, args.run, args.check, args.execute)
+        code = 3 if out.get('executed') and not out.get('passed') else 0
+    elif args.cmd == 'assess':
+        e.assess(args.run, args.criterion, args.note, args.actor)
+        out = {'recorded': True, 'independent_human_identity_verified': False}
+    elif args.cmd == 'complete':
+        out = e.complete(args.run)
+        code = 0 if out['completed'] else 3
+    elif args.cmd in ('pause', 'cancel'):
+        e.pause(args.run, args.reason, args.cmd == 'cancel')
+        out = {'status': store.run(args.run)['status'], 'processes_killed': False}
+    elif args.cmd == 'resume':
+        out = e.resume(args.run, args.accept_drift, args.workers_stopped, args.session)
+    elif args.cmd == 'sync-usage':
+        results = usage.sync(e, args.run)
+        run = store.run(args.run)
+        out = {'results': results, 'budget': dict(e.budget(run), usage_synced_at=run.get('last_usage_sync'))}
+    elif args.cmd == 'report':
+        out = report.report(e, args.run)
+        if args.format == 'md':
+            print(report.markdown(out))
+            return None, 0
+    if args.cmd == 'status' and args.compact and args.run:
+        out = report.compact(out)
+    return out, code
+
+
+def offline(args, project):
+    """prepare/analyze: no DB is created just to analyze a report or prepare a plan."""
+    store = None
+    exists = state_path(project, args.scope).is_file()
+    try:
+        if args.cmd == 'prepare':
+            plan = read_plan(args.plan)
+            if args.use_history and exists:
+                store = open_store(project, args.scope)
+            history = telemetry.history(store, plan.get('workload', 'unspecified')) if args.use_history else None
+            return validate_plan(efficiency.prepare(plan, args.profile, history))
+        if args.report_file:
+            raw = args.report_file.read_bytes()
+            if len(raw) > 4 * 1024 * 1024:
+                raise HarnessError('Report file too large')
+            return telemetry.metrics(json.loads(raw))
+        if exists:
+            store = open_store(project, args.scope)
+        if args.run:
+            if store is None:
+                raise HarnessError('No managed runs registered')
+            return telemetry.metrics(report.report(Engine(store), args.run))
+        return telemetry.history(store, args.workload)
+    finally:
+        if store:
+            store.close()
+
+
+def emit(args, out):
+    if getattr(args, 'format', 'json') == 'text':
+        text = doctor_text(out) if args.cmd == 'doctor' else status_text(out) if args.cmd == 'status' else None
+        if text is not None:
+            print(text)
+            return
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
 def main(argv=None):
-    args=parser().parse_args(argv);store=None;payload=None
+    args = parser().parse_args(argv)
+    store = None
+    payload = None
     try:
         # Hook input is untrusted. Never shell-execute fields or echo raw payloads.
-        if args.cmd=='hook':
-            data=sys.stdin.buffer.read(1024*1024+1)
-            if len(data)>1024*1024:raise HarnessError('Oversized hook input')
-            payload=json.loads(data)
-        project=args.project.resolve(strict=True)
-        if args.cmd in ('prepare','analyze'):
-            # No DB is created just to analyze a report or prepare a plan.
-            exists=(project/'.astra-luna-sol/state/runs.sqlite').is_file()
-            if args.cmd=='prepare':
-                raw=args.plan.read_bytes()
-                if len(raw)>262144:raise HarnessError('Plan file too large')
-                plan=json.loads(raw)
-                if args.use_history and exists:store=Store(project)
-                history=telemetry.history(store,plan.get('workload','unspecified')) if args.use_history else None
-                out=validate_plan(efficiency.prepare(plan,args.profile,history))
-            elif args.report_file:
-                raw=args.report_file.read_bytes()
-                if len(raw)>4*1024*1024:raise HarnessError('Report file too large')
-                out=telemetry.metrics(json.loads(raw))
+        if args.cmd == 'hook':
+            data = sys.stdin.buffer.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024:
+                raise HarnessError('Oversized hook input')
+            payload = json.loads(data)
+        args.scope = detect_scope()
+        project = resolve_project(args, args.scope, payload)
+        if project is None:
+            # Global hook outside any git project: nothing to record or enforce.
+            print(json.dumps({}))
+            return 0
+        if args.cmd in ('prepare', 'analyze'):
+            print(json.dumps(offline(args, project), ensure_ascii=False, indent=2))
+            return 0
+        if args.cmd in ('status', 'doctor') and not state_path(project, args.scope).exists():
+            if args.cmd == 'doctor':
+                out = doctor(project, None, args.probe, args.scope)
             else:
-                if exists:store=Store(project)
-                if args.run:
-                    if store is None:raise HarnessError('No managed runs registered')
-                    out=telemetry.metrics(report.report(Engine(store),args.run))
-                else:out=telemetry.history(store,args.workload)
-            print(json.dumps(out,ensure_ascii=False,indent=2));return 0
-        if args.cmd in ('status','doctor') and not (project/'.astra-luna-sol/state/runs.sqlite').exists():
-            out=doctor(project,None,args.probe) if args.cmd=='doctor' else {'runs':[],'note':'No managed runs registered'}
-            print(json.dumps(out,ensure_ascii=False,indent=2));return 0
-        store=Store(project)
-        e=Engine(store);code=0
-        if args.cmd=='hook':out=hooks.handle(store,payload)
-        elif args.cmd=='start':
-            data=args.plan.read_bytes()
-            if len(data)>262144:raise HarnessError('Plan file too large')
-            out={'run':e.start(json.loads(data),args.session,args.mode,args.ack_hook_limits),'models_called':False}
-        elif args.cmd=='doctor':out=doctor(store.project,store,args.probe)
-        elif args.cmd=='status':
-            out=report.report(e,args.run) if args.run else {'runs':[{k:r.get(k) for k in ('id','status','session','mode','updated')} for r in store.runs()]}
-        elif args.cmd=='task-message':
-            r=store.run(args.run);t=store.task(args.run,args.task)
-            print(efficiency.build_message(r['plan'],t));return 0
-        elif args.cmd=='begin-head':out=e.begin_head(args.run,args.task);code=0 if out['allowed'] else 3
-        elif args.cmd=='measure':out=telemetry.review_measurement(e,args.run,args.workload,args.quality,args.ack_recorded_only,args.elapsed_seconds)
-        elif args.cmd=='reserve':out=e.reserve(args.run,args.task,args.call_id);code=0 if out['allowed'] else 3
-        elif args.cmd=='bind':e.bind(args.run,args.call_id,args.thread);out={'bound':True}
-        elif args.cmd=='finish':e.finish(args.run,args.task,args.note,args.failed,args.workers_stopped,args.error_code);out={'recorded':True,'completion_verified':False}
-        elif args.cmd=='accept':e.accept(args.run,args.task);out={'accepted':True,'basis':'declared_checks_and_HEAD_assessment'}
-        elif args.cmd=='retry':e.retry(args.run,args.task,args.approach,args.role);out={'pending':True,'worker_restarted':False}
-        elif args.cmd=='verify':out=verify.verify(e,args.run,args.check,args.execute);code=3 if out.get('executed') and not out.get('passed') else 0
-        elif args.cmd=='assess':e.assess(args.run,args.criterion,args.note,args.actor);out={'recorded':True,'independent_human_identity_verified':False}
-        elif args.cmd=='complete':out=e.complete(args.run);code=0 if out['completed'] else 3
-        elif args.cmd in ('pause','cancel'):e.pause(args.run,args.reason,args.cmd=='cancel');out={'status':store.run(args.run)['status'],'processes_killed':False}
-        elif args.cmd=='resume':out=e.resume(args.run,args.accept_drift,args.workers_stopped,args.session)
-        elif args.cmd=='sync-usage':out={'results':usage.sync(e,args.run),'budget':e.budget(store.run(args.run))}
-        elif args.cmd=='report':
-            out=report.report(e,args.run)
-            if args.format=='md':print(report.markdown(out));return 0
-        if args.cmd=='status' and args.compact and args.run:out=report.compact(out)
-        print(json.dumps(out,ensure_ascii=False,indent=2));return code
-    except (HarnessError,OSError,ValueError,TypeError,KeyError,sqlite3.Error,subprocess.TimeoutExpired) as ex:
-        if args.cmd=='hook':
+                out = {'runs': [], 'note': 'No managed runs registered', 'next': 'harness.py start --plan <plan.json>'}
+            emit(args, out)
+            return 0
+        store = open_store(project, args.scope)
+        if args.cmd == 'hook':
+            out = hooks.handle(store, payload)
+            code = 0
+        else:
+            out, code = dispatch(args, store)
+            if out is None:
+                return code
+        emit(args, out)
+        return code
+    except (HarnessError, OSError, ValueError, TypeError, KeyError, sqlite3.Error, subprocess.TimeoutExpired) as ex:
+        if args.cmd == 'hook':
             # Fail visibly; never certify completion or queue recovery on corrupt
             # state. Runtime hook errors may fail open in Codex: not a sandbox.
-            print(json.dumps(hooks.warn('ALS unavailable: '+type(ex).__name__+'. No completion certification or automatic recovery. Inspect harness.py doctor.')))
+            print(json.dumps(hooks.warn('ALS unavailable: ' + type(ex).__name__
+                                        + '. No completion certification or automatic recovery.'
+                                        + ' Inspect harness.py doctor.')))
             return 0
-        print('ALS ERROR: '+redact(str(ex)),file=sys.stderr);return 2
+        message = redact(str(ex)) if str(ex) else type(ex).__name__
+        if isinstance(ex, FileNotFoundError):
+            message = 'File not found: ' + redact(str(ex.filename))
+            hint = "check the path; pass --plan - to read the plan from stdin"
+        else:
+            hint = next_step(args, message)
+        print('ALS ERROR: ' + message, file=sys.stderr)
+        if hint and 'Next:' not in message:
+            print('Next: ' + hint, file=sys.stderr)
+        return 2
     finally:
-        if store:store.close()
+        if store:
+            store.close()
