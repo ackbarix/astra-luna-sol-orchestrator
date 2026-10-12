@@ -143,6 +143,4 @@ description: "범용 개발 팀 하네스. 기능 추가, 버그 수정, 리팩�
 ## 참고
 
 - 프로젝트 전용 팀 설계·개선: `$harness`, `$harness-evolve`
-- 선택 기능인 관리형 실행(작업 등록, 파일 예약, 증거 기반 완료 검사):
-  `${ALS_HOME:-~/.local/share/als}/harness-guide.md` (프로젝트 설치: `.astra-luna-sol/harness-guide.md`).
-  사용자가 관리형 실행을 요청했을 때만 읽는다.
+- 작업 기록은 `_workspace/`의 파일로 남긴다. 별도의 실행 등록이나 완료 인증 절차는 없다.

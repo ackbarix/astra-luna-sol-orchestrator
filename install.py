@@ -3,10 +3,15 @@
 
 Modes (no model calls, no network access):
   --target PROJECT               project-local install (default mode)
-  --global                       shared install: harness in $ALS_HOME, roles/skill
+  --global                       shared install: tools in $ALS_HOME, roles/skills
                                  and the `als` profile in $CODEX_HOME; never edits
-                                 $CODEX_HOME/config.toml and installs no hooks
-  --target PROJECT --hooks-only  per-project hooks that call the global harness
+                                 $CODEX_HOME/config.toml
+  --target PROJECT --hooks-only  --check/--uninstall only: remove the per-project
+                                 hooks of releases before 1.2
+
+1.2 removed the managed-run harness (hooks, claims, completion evidence).
+Reinstalling over an older release removes its harness files and ALS hook
+groups; runtime state/evidence data are never deleted.
 
 Modified owned files and symlinks fail closed. An interrupted/failed write is
 rolled back on ordinary exceptions; power-loss atomicity is not claimed.
@@ -25,22 +30,19 @@ if sys.version_info < (3, 9):
     raise SystemExit(2)
 
 import argparse
-import base64
 import copy
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
-import re
 import shlex
 import shutil
 import stat
-import subprocess
 import tempfile
 import time
 
 import config_overlay
-from als_harness import integration as hook_config
+from als_harness import integration as hook_config  # only to remove pre-1.2 hooks
 
 ROOT = Path(__file__).resolve().parent
 START, END = "<!-- ALS:BEGIN -->", "<!-- ALS:END -->"
@@ -54,6 +56,10 @@ VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 LEGACY_DIRS = [".astra-luna-sol/als_harness", ".astra-luna-sol/licenses", ".astra-luna-sol",
                ".agents/skills/astra-luna-sol", ".agents/skills", ".agents", ".codex/agents"]
 EXIT_OK, EXIT_ABSENT, EXIT_DRIFT, EXIT_OUTDATED = 0, 1, 2, 4
+DEFAULT_PYTHON = "python3"
+# Prefixes of project files older releases managed; reinstalling removes those
+# this release no longer ships (unmodified only; edited ones refuse as drift).
+RETIRED_PREFIXES = (".astra-luna-sol/", ".agents/skills/", ".codex/agents/")
 
 
 def legacy_dirs(state: dict) -> list[str]:
@@ -101,29 +107,6 @@ def file_mode(path: Path) -> int | None:
 def release_mode(rel: str) -> int:
     return 0o755 if rel.endswith((".sh", ".py")) or rel.rsplit("/", 1)[-1] in ("als", "als-flow", "als-agent",
                                                                                 "als-task") else 0o644
-
-
-RUNTIME_FLOOR = (3, 9)
-
-
-def hook_python() -> str:
-    """'python3' when PATH has a 3.9+ python3; else this interpreter's path."""
-    found = shutil.which("python3")
-    if found:
-        try:
-            probe = subprocess.run([found, "-c", "import sys;sys.exit(sys.version_info[:2] < (3, 9))"],
-                                   capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
-            if probe.returncode == 0:
-                return hook_config.DEFAULT_PYTHON
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    me = os.path.abspath(sys.executable or "")
-    if sys.version_info[:2] >= RUNTIME_FLOOR and sys.executable and os.path.isfile(me):
-        print("NOTICE: `python3` on PATH is " + ("older than 3.9 or unusable" if found else "missing")
-              + "; hooks will run " + me, file=sys.stderr)
-        return me
-    raise Refused("Hooks need Python 3.9+ as python3 on PATH; install it or rerun the installer with a "
-                  "suitable interpreter")
 
 
 def atomic_write(path: Path, data: bytes | None, mode: int = 0o644) -> None:
@@ -321,9 +304,6 @@ def runtime_sources() -> dict[str, Path]:
         "smoke-test.txt": ROOT / "docs/smoke-test.txt",
         "VERSION": ROOT / "VERSION",
         "licenses/Apache-2.0.txt": ROOT / "licenses/Apache-2.0.txt",
-        "harness.py": ROOT / "scripts/harness.py",
-        "harness-guide.md": ROOT / "docs/harness.md",
-        "efficiency-guide.md": ROOT / "docs/efficiency.md",
     }
     for module in sorted((ROOT / "als_harness").glob("*.py")):
         out["als_harness/" + module.name] = module
@@ -347,7 +327,7 @@ FLOW_COMMANDS = {"als-flow": "als_flow.cli", "als-agent": "als_flow.agent", "als
 
 def flow_wrapper(command: str, als_home: Path) -> bytes:
     """Installed wrapper for an als_flow command, pinned to this install's ALS_HOME/interpreter."""
-    python = configured_python() or hook_config.DEFAULT_PYTHON
+    python = configured_python() or DEFAULT_PYTHON
     return ("#!/bin/sh\n# " + command + " (installed by ALS): runs " + FLOW_COMMANDS[command]
             + " from ALS_HOME.\nset -eu\nals_home=${ALS_HOME:-" + shlex.quote(str(als_home)) + "}\n"
             'PYTHONPATH="$als_home${PYTHONPATH:+:$PYTHONPATH}"\nexport PYTHONPATH\n'
@@ -356,7 +336,7 @@ def flow_wrapper(command: str, als_home: Path) -> bytes:
 
 RELEASE_TOP = ("install.py", "install.sh", "setup.sh", "config_overlay.py", "VERSION", "bin/als",
                "bin/als-flow", "bin/als-agent", "bin/als-task", "harness/NOTICE.md",
-               "docs/harness.md", "docs/efficiency.md", "docs/smoke-test.txt")
+               "docs/smoke-test.txt")
 
 
 def release_files() -> dict[str, Path]:
@@ -497,12 +477,6 @@ def print_plan(session: Session, plan: dict) -> None:
             print("CHMOD  " + session.layout.show(key) + " " + oct(want))
 
 
-def git_warning(target: Path) -> None:
-    if not (target / ".git").exists():
-        print("WARNING: " + str(target) + " is not a git work tree root; ALS hooks locate the repository "
-              "with git and will not run here", file=sys.stderr)
-
-
 def validate_target(raw: str | None) -> Path:
     if raw is None or not raw.strip():
         raise Refused("Empty project path; pass an existing project directory, e.g. "
@@ -632,17 +606,6 @@ def resolve_policy(target: Path, requested: str | None, state: dict, remedy_args
     return rel
 
 
-def hooks_only_registered(target: Path) -> bool:
-    """The global manifest lists target as a --hooks-only project."""
-    try:
-        als_home = global_homes()[0]
-        state = json.loads((als_home / "manifest.json").read_text(encoding="utf-8"))
-    except (Refused, OSError, ValueError):
-        return False
-    projects = state.get("hooks_projects") if isinstance(state, dict) else None
-    return isinstance(projects, dict) and str(target) in projects
-
-
 def project_mode(args) -> int:
     target = validate_target(args.target)
     removing = args.uninstall or args.force_uninstall
@@ -658,7 +621,8 @@ def project_mode(args) -> int:
     raw_state = session.snapshot(MANIFEST)
     state = load_manifest(raw_state, MANIFEST, remedy, {"files": {}, "agents": None, "created": False})
     src = project_sources()
-    if set(state["files"]) - (set(src) | {CONFIG}):
+    retired = sorted(set(state["files"]) - (set(src) | {CONFIG}))
+    if any(not key.startswith(RETIRED_PREFIXES) for key in retired):
         raise Refused("Manifest includes unknown managed paths; manual review required")
     if CONFIG in state["files"]:
         state.setdefault("config", {"mode": "created", "sha256": state["files"].pop(CONFIG)})
@@ -667,8 +631,7 @@ def project_mode(args) -> int:
         return EXIT_ABSENT if args.check else EXIT_OK
     if no_toml and (state.get("config") or {}).get("mode", "created") != "created":
         raise Refused(config_overlay.TOML_MISSING + " (this install merged ALS keys into " + CONFIG + ")")
-    mode_args = [] if not args.skip_hooks else ["--skip-hooks"]
-    policy = resolve_policy(target, args.policy_file, state, mode_args)
+    policy = resolve_policy(target, args.policy_file, state, [])
     desired = {rel: path.read_bytes() for rel, path in src.items()}
     force_cmd = installer_command(t, "--force-uninstall")
     missing, modified = classify(session, state["files"])
@@ -776,36 +739,17 @@ def project_mode(args) -> int:
         merged, next_config = config_overlay.merge(restored)
         config_data = merged.encode("utf-8")
 
-    next_hooks = None
-    python = state.get("interpreter", hook_config.DEFAULT_PYTHON)
-    base_hooks = restored_hooks if hooks_state else before_hooks
-    try:
-        global_handler = base_hooks is not None and hook_config.has_global_handler(hook_config.parse(base_hooks))
-    except ValueError:
-        if not args.skip_hooks:
-            raise
-        global_handler = False  # --skip-hooks leaves an unparseable user hooks.json alone
-    # Every project install (with or without --skip-hooks): global-harness
-    # hooks would keep logging to the global state, never to this project's DB.
-    if hooks_only_registered(target) or global_handler:
-        raise Refused("This project has --hooks-only ALS hooks that call the global harness. In " + t
-                      + " run `als uninstall --hooks-only` first, then rerun the project install.")
-    if args.skip_hooks:
-        hooks_data = restored_hooks
-    else:
-        if config_overlay.parse(text(before_config)).get("hooks"):
-            raise Refused("Inline Codex hooks already exist in " + CONFIG + "; reconcile them or install without "
-                          "hooks: " + installer_command(t, "--skip-hooks"))
-        python = hook_python()
-        hooks_data, next_hooks = hook_config.merge(base_hooks, None, "project", None, python)
-        git_warning(target)
+    # 1.2 installs no hooks; remove the ALS groups an older release added.
+    python = state.get("interpreter", DEFAULT_PYTHON)
 
     plan: dict[str, bytes | None] = dict(desired)
     for rel in desired:
         session.snapshot(rel)
         session.modes[rel] = release_mode(rel)
-    if next_hooks or hooks_state:
-        plan[HOOKS] = hooks_data
+    for key in retired:
+        plan[key] = None
+    if hooks_state:
+        plan[HOOKS] = restored_hooks
     plan[CONFIG] = config_data
     block = snippet_block()
     original = text(original_agents)
@@ -830,7 +774,7 @@ def project_mode(args) -> int:
         previous_dirs = []
     new_dirs = [layout.dir_key(d) for d in planned_dirs(layout, [*plan, MANIFEST])]
     manifest = {"version": VERSION, "files": {rel: digest(data) for rel, data in desired.items()},
-                "config": next_config, "hooks": next_hooks, "agents": digest(block.encode()),
+                "config": next_config, "hooks": None, "agents": digest(block.encode()),
                 "agents_join": join, "created": created_flag, "policy_file": policy, "interpreter": python,
                 "created_dirs": sorted(set(previous_dirs) | set(new_dirs))}
     plan[MANIFEST] = (json.dumps(manifest, indent=2) + "\n").encode()
@@ -841,7 +785,8 @@ def project_mode(args) -> int:
         print("DRY RUN: nothing written, no Codex/OpenCodex calls")
         return EXIT_OK
     commit(target, plan, {k: session.snapshots[k] for k in plan}, session.modes, layout)
-    print("INSTALL OK " + VERSION + ": run codex; review /hooks before managing a run (observe default)")
+    print("INSTALL OK " + VERSION + ": start Codex in this project (als run)"
+          + ("; removed the ALS hooks of the previous release" if hooks_state else ""))
     return EXIT_OK
 
 
@@ -852,21 +797,12 @@ def project_check(session, state, desired, drift, before_config, config_state, r
         print("DRIFT: " + "; ".join(drift))
         print("Inspect the files. To back up and remove ALS-managed paths: " + installer_command(t, "--force-uninstall"))
         return EXIT_DRIFT
-    moved = hook_config.legacy_project(hooks_state)
-    if moved and moved != t and not args.skip_hooks:
-        print("PROJECT MOVED: installed hooks still point to " + moved + "; relocate them with: "
-              + installer_command(t))
-        return EXIT_DRIFT
-    if hooks_state and hook_config.unmanaged_changed(before_hooks, hooks_state):
-        print("UNMANAGED HOOKS CHANGED: ALS groups in " + HOOKS + " are intact, but other hook definitions "
-              "changed since install; review /hooks. Uninstall will splice out only ALS groups.")
-        return EXIT_DRIFT
     modes = mode_drift(session, state["files"])
     if modes:
         print("MODE DRIFT: " + ", ".join(f"{k} {oct(session.mode(k))} (expected {oct(release_mode(k))})"
                                           for k in modes) + "; repair with: " + installer_command(t))
         return EXIT_DRIFT
-    outdated = state.get("version") != VERSION or config_state is None
+    outdated = state.get("version") != VERSION or config_state is None or bool(hooks_state)
     outdated |= any(state["files"].get(k) != digest(v) for k, v in desired.items())
     if restored is None:
         outdated |= before_config != (ROOT / "profiles/config.toml").read_bytes()
@@ -875,21 +811,11 @@ def project_check(session, state, desired, drift, before_config, config_state, r
             outdated |= config_overlay.merge(restored)[0].encode() != before_config
         except ValueError:
             outdated = True
-    if not args.skip_hooks:
-        if not hooks_state:
-            outdated = True
-        else:
-            current = hook_config.remove(before_hooks, hooks_state)
-            try:
-                outdated |= hook_config.merge(current, None, "project", None,
-                                              state.get("interpreter"))[0] != before_hooks
-            except ValueError:
-                outdated = True
     if args.policy_file is None and state.get("agents") != digest(snippet_block().encode()):
         outdated = True
     if outdated:
         print("ALS OUTDATED: installed " + str(state.get("version") or "pre-0.3") + ", this release " + VERSION
-              + "; files are intact. Update with: " + installer_command(t, *(["--skip-hooks"] if args.skip_hooks else [])))
+              + "; files are intact. Update with: " + installer_command(t))
         return EXIT_OUTDATED
     print("INSTALL VERIFIED " + VERSION + ": file/config/mode integrity only; live Codex routing not verified")
     return EXIT_OK
@@ -981,12 +907,15 @@ def global_homes() -> tuple[Path, Path, Path]:
 
 
 GLOBAL_MANIFEST = "ALS_HOME/manifest.json"
+# Global files older releases managed; reinstalling removes those this release
+# no longer ships (e.g. the pre-1.2 harness). Edited ones refuse as drift.
+GLOBAL_RETIRED_PREFIXES = ("ALS_HOME/", "CODEX_HOME/skills/", "CODEX_HOME/agents/als_")
 
 
 def configured_python() -> str:
     """Absolute ALS_PYTHON from the environment, or '' for the python3 default."""
     value = os.environ.get("ALS_PYTHON", "")
-    if not value or value == hook_config.DEFAULT_PYTHON:
+    if not value or value == DEFAULT_PYTHON:
         return ""
     found = value if os.sep in value else shutil.which(value)
     if not found:
@@ -1027,7 +956,8 @@ def global_mode(args) -> int:
                           + name + "=" + shlex.quote(state[key]) + " "
                           + installer_command("--global", *(["--check"] if args.check else [])))
     src = global_sources()
-    if set(state["files"]) - set(src):
+    retired = set(state["files"]) - set(src)
+    if any(not key.startswith(GLOBAL_RETIRED_PREFIXES) for key in retired):
         raise Refused("Manifest includes unknown managed paths; manual review required")
     desired = {key: path.read_bytes() for key, path in src.items()}
     desired["BIN/als"] = entrypoint(desired["BIN/als"], als_home)
@@ -1053,20 +983,19 @@ def global_mode(args) -> int:
             print("MODE DRIFT: " + ", ".join(layout.show(k) for k in modes) + "; repair with: "
                   + installer_command("--global"))
             return EXIT_DRIFT
-        stale_hooks = [p for p, h in projects.items()
-                       if h.get("groups") != hook_config.groups("global", als_home, h.get("interpreter"))]
         if state.get("version") != VERSION or any(state["files"].get(k) != digest(v) for k, v in desired.items()) \
-                or set(state["files"]) != set(desired) or stale_hooks:
+                or set(state["files"]) != set(desired) or projects:
             print("ALS OUTDATED: installed " + str(state.get("version")) + ", this release " + VERSION
                   + "; files are intact. Update with: " + installer_command("--global")
-                  + "".join("; and " + installer_command(p, "--hooks-only") for p in stale_hooks))
+                  + "".join("; and remove old hooks: " + installer_command(p, "--hooks-only", "--uninstall")
+                            for p in projects))
             return EXIT_OUTDATED
         print("GLOBAL INSTALL VERIFIED " + VERSION + ": file/mode integrity only; opt in with `codex --profile als`;"
               " live Codex routing not verified")
         return EXIT_OK
     if removing:
         if projects:
-            raise Refused("Projects still use the global harness through hooks; run `als uninstall --hooks-only` "
+            raise Refused("Projects still have ALS hooks from a release before 1.2; run `als uninstall --hooks-only` "
                           "in each project first:\n  "
                           + "\n  ".join("cd " + shlex.quote(p) + " && als uninstall --hooks-only" for p in projects))
         if modified and not args.force_uninstall:
@@ -1122,39 +1051,14 @@ def global_mode(args) -> int:
     commit(als_home, plan, {k: session.snapshots[k] for k in plan}, session.modes, layout)
     # Point at the installed entrypoint, not this clone, which may be deleted.
     print("GLOBAL INSTALL OK " + VERSION + ": start Codex with `als run` (codex --profile als); "
-          + "add harness hooks per project with `cd PROJECT && als install --hooks-only`")
-    if projects and any(h.get("groups") != hook_config.groups("global", als_home, h.get("interpreter"))
-                        for h in projects.values()):
-        print("NOTE: refresh project hooks with --hooks-only for: " + ", ".join(projects))
+          + "apply the generic harness per project with `cd PROJECT && als harness init`")
+    if projects:
+        print("NOTE: these projects still have ALS hooks from a release before 1.2 (they now do nothing); "
+              "remove them with `als uninstall --hooks-only` in: " + ", ".join(projects))
     if str(bin_dir) not in [os.path.realpath(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p]:
         print("NOTE: " + str(bin_dir) + " is not on PATH; add this line to your shell profile:\n"
               "  export PATH=\"" + str(bin_dir) + ":$PATH\"")
     return EXIT_OK
-
-
-HOOKS_HEADER = re.compile(r'''\s*\[\[?\s*(?:hooks|"hooks"|'hooks')\s*[.\]]''')
-ROOT_HOOKS_KEY = re.compile(r'''\s*(?:hooks|"hooks"|'hooks')\s*[.=]''')
-
-
-def inline_hooks(content: str) -> bool:
-    """Codex hooks defined inline in a project config.toml.
-
-    Only the root ``hooks`` key counts: ``[hooks...]``/``[[hooks...]]`` tables
-    or root-level ``hooks =``/``hooks.x =``. ``[features] hooks = true`` (the
-    feature switch) does not. The text scan is used without a TOML parser.
-    """
-    if config_overlay.tomllib is not None:
-        return bool(config_overlay.parse(content).get("hooks"))
-    lines = content.splitlines()
-    at_root = True
-    for line, header in zip(lines, config_overlay.table_headers(lines)):
-        if header:
-            if HOOKS_HEADER.match(line):
-                return True
-            at_root = False
-        elif at_root and ROOT_HOOKS_KEY.match(line):
-            return True
-    return False
 
 
 def hooks_only_mode(args) -> int:
@@ -1208,8 +1112,9 @@ def hooks_only_mode(args) -> int:
                 return EXIT_DRIFT
             print("Not installed")
             return EXIT_ABSENT if args.check else EXIT_OK
-    if entry is None and args.adopt:
-        entry = hook_config.adopt(before, "global", als_home)
+    if not (args.check or removing):
+        raise Refused("--hooks-only installs were removed in 1.2 with the managed-run harness; only "
+                      "--hooks-only --check/--uninstall remain, to clean up older installs")
     error, restored = None, before
     if entry and before is None:
         restored = None
@@ -1228,15 +1133,11 @@ def hooks_only_mode(args) -> int:
         if hook_config.unmanaged_changed(before, entry):
             print("UNMANAGED HOOKS CHANGED: ALS groups intact; other hook definitions changed since install")
             return EXIT_DRIFT
-        if entry["groups"] != hook_config.groups("global", als_home, entry.get("interpreter")) \
-                or gstate.get("version") != VERSION:
-            print("ALS OUTDATED: refresh with " + installer_command(t, "--hooks-only"))
-            return EXIT_OUTDATED
-        print("HOOKS VERIFIED " + VERSION + ": " + HOOKS + " -> "
-              + hook_config.command("global", als_home, entry.get("interpreter")))
-        return EXIT_OK
+        print("ALS OUTDATED: these hooks belong to a release before 1.2; remove them with "
+              + installer_command(t, "--hooks-only", "--uninstall"))
+        return EXIT_OUTDATED
     plan: dict[str, bytes | None] = {}
-    if removing:
+    if removing:  # always true here: --hooks-only installs were refused above
         if error and not args.force_uninstall:
             raise Refused(HOOKS + ": " + error + ". Inspect it, or back it up and remove with: " + force_cmd)
         if error:
@@ -1245,24 +1146,6 @@ def hooks_only_mode(args) -> int:
         elif before is not None:
             plan[key] = restored
         projects.pop(t, None)
-    else:
-        if error:
-            raise Refused(HOOKS + ": " + error + ". Inspect it; to back it up and remove: " + force_cmd)
-        if (target / MANIFEST).exists():
-            raise Refused("This project has a project-mode ALS install; its hooks are managed there. "
-                          "Uninstall it first: " + installer_command(t, "--uninstall"))
-        project_config = target / CONFIG
-        if project_config.is_file() and not project_config.is_symlink():
-            if inline_hooks(project_config.read_text(encoding="utf-8")):
-                raise Refused("Inline Codex hooks already exist in " + CONFIG + "; reconcile them first")
-        python = hook_python()
-        data, new_state = hook_config.merge(restored, None, "global", als_home, python)
-        new_state["interpreter"] = python
-        new_state["created_dirs"] = sorted(set((entry or {}).get("created_dirs", []))
-                                           | {str(d) for d in planned_dirs(layout, [key])})
-        plan[key] = data
-        projects[t] = new_state
-        git_warning(target)
     gstate_bytes = (json.dumps(gstate, indent=2) + "\n").encode()
     print_plan(session, plan)
     print("UPDATE " + where)
@@ -1271,13 +1154,9 @@ def hooks_only_mode(args) -> int:
         return EXIT_OK
     plan[GLOBAL_MANIFEST] = gstate_bytes
     commit(target, plan, {k: session.snapshots[k] for k in plan}, None, layout)
-    if removing:
-        recorded = [Path(d) for d in (entry or {}).get("created_dirs", [])]
-        remove_empty_dirs([d for d in recorded if d.is_absolute() and target in d.parents])
-        print("HOOKS UNINSTALL OK")
-    else:
-        print("HOOKS INSTALL OK: " + HOOKS + " runs " + hook_config.command("global", als_home, python)
-              + "; trust and review them with /hooks")
+    recorded = [Path(d) for d in (entry or {}).get("created_dirs", [])]
+    remove_empty_dirs([d for d in recorded if d.is_absolute() and target in d.parents])
+    print("HOOKS UNINSTALL OK")
     return EXIT_OK
 
 
@@ -1289,12 +1168,12 @@ def parser() -> argparse.ArgumentParser:
         usage="install.py (--target PROJECT [--hooks-only] | --global) [options]")
     ap.add_argument("--target", help="existing project directory (project or --hooks-only mode)")
     ap.add_argument("--global", dest="global_mode", action="store_true",
-                    help="install into $ALS_HOME and $CODEX_HOME (profile `als`), no hooks")
+                    help="install into $ALS_HOME and $CODEX_HOME (profile `als`)")
     ap.add_argument("--hooks-only", action="store_true",
-                    help="write only the project .codex/hooks.json that calls the global harness")
+                    help="with --check/--uninstall: the project hooks of releases before 1.2")
     ap.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
     ap.add_argument("--skip-hooks", action="store_true",
-                    help="project mode: install CLI only; remove only prior ALS hook groups")
+                    help="accepted for compatibility; 1.2 installs no hooks")
     ap.add_argument("--adopt", action="store_true",
                     help="take ownership of existing files byte-identical to this release (lost manifest)")
     ap.add_argument("--policy-file", metavar="PATH",

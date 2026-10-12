@@ -145,42 +145,6 @@ class LegacyUpgradeUninstallTests(R3Sandbox, unittest.TestCase):
 
 
 # ------------------------------------------------------------------ item 2
-class InlineHooksTests(unittest.TestCase):
-    def scan(self, content):
-        with mock.patch.object(config_overlay, 'tomllib', None):
-            return install.inline_hooks(content)
-
-    def test_feature_switch_is_not_inline_hooks(self):
-        self.assertFalse(self.scan('[features]\nhooks = true\nmulti_agent = true\n'))
-        self.assertFalse(self.scan('model = "x"\n[profiles.a]\nhooks = 1\n[hooksmith]\nx = 1\n'))
-        self.assertFalse(self.scan('x = [\n  "[hooks]",\n]\n'))
-
-    def test_root_hooks_detected(self):
-        for content in ('hooks = {}\n', 'hooks.Stop = []\n', '"hooks".Stop = []\n', '[hooks]\nx = 1\n',
-                        '[[hooks.Stop]]\nmatcher = "x"\n', 'a = 1\n[ hooks . PreToolUse ]\n'):
-            with self.subTest(content=content):
-                self.assertTrue(self.scan(content))
-
-    @unittest.skipUnless(HAVE_TOML, 'reference parser needs tomllib or tomli')
-    def test_text_scan_agrees_with_parser(self):
-        for content in ('[features]\nhooks = true\n', 'hooks.Stop = []\n', '[[hooks.Stop]]\nmatcher = "x"\n',
-                        'model = "m"\n'):
-            with self.subTest(content=content):
-                self.assertEqual(self.scan(content), install.inline_hooks(content))
-
-
-class HooksOnlyWithoutTomlTests(R3Sandbox, unittest.TestCase):
-    def test_hooks_only_accepts_features_hooks_without_toml(self):
-        self.ok(subprocess.run([sys.executable, '-c', NO_TOML, '--global'], capture_output=True, text=True,
-                               env=self.env))
-        (self.p / '.codex').mkdir()
-        (self.p / '.codex/config.toml').write_text('[features]\nhooks = true\n')
-        result = subprocess.run([sys.executable, '-c', NO_TOML, '--target', str(self.p), '--hooks-only'],
-                                capture_output=True, text=True, env=self.env)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue((self.p / '.codex/hooks.json').is_file())
-
-
 # ------------------------------------------------------------------ items 3, 5, 11, 14
 class EntrypointTests(R3Sandbox, unittest.TestCase):
     def setup(self, **extra):
@@ -191,18 +155,14 @@ class EntrypointTests(R3Sandbox, unittest.TestCase):
 
     def test_doctor_json_is_one_object(self):
         self.setup()
-        self.ok(self.als('install', '--hooks-only'))  # harness doctor may fail without hooks
         for args in (('doctor', '--no-probe', '--json'), ('doctor', '--json')):
             result = self.als(*args)
-            # Exit status follows required checks (deps and harness doctor); stdout is one object.
             data = json.loads(result.stdout)
-            self.assertEqual(set(data), {'deps', 'harness'})
+            self.assertEqual(set(data), {'deps'})
             self.assertTrue(data['deps']['ok'])
-            self.assertIn('hooks_configured', data['harness'])
         outside = self.base / 'plain'
         outside.mkdir()
-        data = json.loads(self.als('doctor', '--no-probe', '--json', cwd=outside).stdout)
-        self.assertIsNone(data['harness'])
+        self.assertEqual(set(json.loads(self.als('doctor', '--no-probe', '--json', cwd=outside).stdout)), {'deps'})
 
     def test_doctor_json_exit_code_on_required_failure(self):
         self.setup()
@@ -210,14 +170,6 @@ class EntrypointTests(R3Sandbox, unittest.TestCase):
         result = self.als('doctor', '--no-probe', '--json')
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(json.loads(result.stdout)['deps']['ok'])
-
-    def test_plan_new_names_prepare_and_start(self):
-        self.setup()
-        result = self.als('plan', 'new', 'p.json')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('Edit p.json', result.stdout)
-        self.assertIn('als prepare --plan p.json > prepared.json', result.stdout)
-        self.assertIn('als start --plan prepared.json', result.stdout)
 
     def test_setup_path_note_once_and_help_text(self):
         result = self.setup()
@@ -244,36 +196,10 @@ class EntrypointTests(R3Sandbox, unittest.TestCase):
         result = subprocess.run(['sh', str(ROOT / 'setup.sh')], capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         doctor = self.als('doctor', '--no-probe', '--json', env=env)
-        self.assertEqual(set(json.loads(doctor.stdout)), {'deps', 'harness'}, doctor.stderr)
+        self.assertEqual(set(json.loads(doctor.stdout)), {'deps'}, doctor.stderr)
 
 
 # ------------------------------------------------------------------ item 4
-class HooksOnlyThenProjectTests(R3Sandbox, unittest.TestCase):
-    @unittest.skipUnless(HAVE_TOML, 'project mode needs tomllib or tomli')
-    def test_project_install_over_hooks_only_names_working_remedy(self):
-        self.ok(self.glob())
-        self.ok(self.proj('--hooks-only'))
-        result = self.proj()
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('als uninstall --hooks-only', result.stderr)
-        self.assertNotIn('--adopt', result.stderr)
-        # Registry gone but global-form hooks still in the file: same advice.
-        manifest = self.manifest(self.als_home / 'manifest.json')
-        manifest['hooks_projects'] = {}
-        self.write_manifest(manifest, self.als_home / 'manifest.json')
-        result = self.proj()
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('als uninstall --hooks-only', result.stderr)
-
-    def test_global_uninstall_refusal_suggests_als_command(self):
-        self.ok(self.glob())
-        self.ok(self.proj('--hooks-only'))
-        blocked = self.glob('--uninstall')
-        self.assertEqual(blocked.returncode, 2)
-        self.assertIn('cd ' + shlex.quote(str(self.p)) + ' && als uninstall --hooks-only', blocked.stderr)
-        self.assertNotIn('install.sh', blocked.stderr)
-
-
 # ------------------------------------------------------------------ items 6, 7
 class ResolutionTests(R3Sandbox, unittest.TestCase):
     FAKE_HARNESS = 'import os, sys\nprint(os.path.realpath(__file__), *sys.argv[1:])\n'
@@ -328,10 +254,9 @@ class ResolutionTests(R3Sandbox, unittest.TestCase):
         self.ok(self.glob())
         mod = self.submodule()
         (mod / 'deep').mkdir()
-        harness = self.fake_harness(mod)
-        status = self.als('status', cwd=mod / 'deep', env=dict(self.env, CDPATH=str(self.p)))
-        self.assertEqual(status.stdout.split(), [harness, '--project', os.path.realpath(mod), 'status'],
-                         status.stderr)
+        init = self.als('harness', 'init', '--dry-run', cwd=mod / 'deep', env=dict(self.env, CDPATH=str(self.p)))
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertIn('WOULD ADD to ' + os.path.join(os.path.realpath(mod), 'AGENTS.md'), init.stdout)
         # usage.sh / run.sh from a global-style location (not .astra-luna-sol)
         tools = self.base / 'tools'
         tools.mkdir()
@@ -365,42 +290,13 @@ class GlobalHookCommandTests(R3Sandbox, unittest.TestCase):
         cmd = integration.home_command('/h/a b}/als', home='/h/a b}')
         self.assertEqual(cmd, 'python3 ' + shlex.quote('/h/a b}/als/harness.py') + ' hook')
 
-    def test_installed_global_hook_runs_with_home_unset(self):
-        self.ok(self.glob())
-        self.ok(self.proj('--hooks-only'))
-        hooks = json.loads((self.p / '.codex/hooks.json').read_text())
-        cmd = hooks['hooks']['Stop'][0]['hooks'][0]['command']
-        doctor = cmd[:-len(' hook')] + ' --project ' + shlex.quote(str(self.p)) + ' doctor'
-        env = {k: v for k, v in self.env.items() if k != 'HOME'}
-        result = subprocess.run(['sh', '-c', doctor], cwd=self.p, capture_output=True, text=True, env=env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('hooks_configured', result.stdout)
-
-    def test_hooks_only_message_names_resolved_interpreter(self):
-        self.ok(self.glob())
-        fake = self.base / 'nopython'
-        fake.mkdir()
-        git = subprocess.run(['sh', '-c', 'command -v git'], capture_output=True, text=True).stdout.strip()
-        os.symlink(git, fake / 'git')
-        env = dict(self.env, PATH=str(fake))
-        result = subprocess.run([sys.executable, str(ROOT / 'install.py'), '--target', str(self.p), '--hooks-only'],
-                                capture_output=True, text=True, env=env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        me = shlex.quote(os.path.abspath(sys.executable))
-        self.assertIn('HOOKS INSTALL OK: .codex/hooks.json runs ' + me + ' ', result.stdout)
-        check = subprocess.run([sys.executable, str(ROOT / 'install.py'), '--target', str(self.p), '--hooks-only',
-                                '--check'], capture_output=True, text=True, env=env)
-        self.assertEqual(check.returncode, 0, check.stdout)
-        self.assertIn('-> ' + me + ' ', check.stdout)
-
-
 class Upgrade050Tests(R3Sandbox, unittest.TestCase):
     """Hook commands changed after 6f87966; installs written by it must upgrade."""
 
     def old(self):
         return self.extract('6f87966', 'als-6f87966')
 
-    def test_hooks_only_from_6f87966_upgrades_and_uninstalls(self):
+    def test_hooks_only_from_6f87966_is_removed_not_upgraded(self):
         old = self.old()
         before = self.tree()
         run = lambda *a: subprocess.run([sys.executable, str(old / 'install.py'), *a],  # noqa: E731
@@ -409,17 +305,17 @@ class Upgrade050Tests(R3Sandbox, unittest.TestCase):
         self.assertEqual(run('--target', str(self.p), '--hooks-only').returncode, 0)
         self.assertIn('"$HOME/', (self.p / '.codex/hooks.json').read_text())
         self.ok(self.glob())
+        self.assertFalse((self.als_home / 'harness.py').exists())
         self.assertEqual(self.proj('--hooks-only', '--check').returncode, 4)
-        self.ok(self.proj('--hooks-only'))
-        self.assertIn('${HOME:-', (self.p / '.codex/hooks.json').read_text())
-        self.ok(self.proj('--hooks-only', '--check'))
-        self.ok(self.glob('--check'))
+        self.assertEqual(self.glob('--check').returncode, 4)
+        self.assertEqual(self.proj('--hooks-only').returncode, 2)
         self.ok(self.proj('--hooks-only', '--uninstall'))
+        self.ok(self.glob('--check'))
         self.ok(self.glob('--uninstall'))
         self.assertEqual(self.tree(), before)
 
     @unittest.skipUnless(HAVE_TOML, 'project mode needs tomllib or tomli')
-    def test_project_from_6f87966_upgrades_and_uninstalls(self):
+    def test_project_from_6f87966_upgrade_removes_hooks_and_harness(self):
         old = self.old()
         (self.p / '.codex').mkdir()
         user = {'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'echo u'}]}]}}
@@ -430,8 +326,9 @@ class Upgrade050Tests(R3Sandbox, unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.proj('--check').returncode, 4)
         self.ok(self.proj())
-        stop = json.loads((self.p / '.codex/hooks.json').read_text())['hooks']['Stop'][-1]
-        self.assertEqual(stop['hooks'][0]['command'], integration.command('project'))
+        self.assertEqual(json.loads((self.p / '.codex/hooks.json').read_text()), user)
+        self.assertFalse((self.p / '.astra-luna-sol/harness.py').exists())
+        self.assertIsNone(self.manifest()['hooks'])
         self.ok(self.proj('--check'))
         self.ok(self.proj('--uninstall'))
         self.assertEqual(json.loads((self.p / '.codex/hooks.json').read_text()), user)

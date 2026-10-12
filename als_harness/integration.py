@@ -1,4 +1,8 @@
-"""Coexist with user Codex hooks. Merge only exact ALS-owned JSON groups.
+"""ALS hook groups in Codex hooks.json (releases before 1.2).
+
+1.2 removed the managed-run harness and installs no hooks; the installer keeps
+this module only to recognise and splice out the groups older releases added,
+leaving user hooks untouched.
 
 Hook commands are relocatable (0.5): a project install resolves the main
 repository root at run time through git, so moving the project or opening a
@@ -16,7 +20,15 @@ from pathlib import Path
 import re
 import shlex
 
-from .common import HarnessError, digest
+import hashlib
+
+
+class HarnessError(ValueError):
+    """An unsafe or unsupported hooks change."""
+
+
+def digest(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
 
 HOOK_EVENTS = (
     'SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart',

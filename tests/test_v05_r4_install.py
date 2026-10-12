@@ -67,55 +67,7 @@ class R4Sandbox(r3.R3Sandbox):
 
 
 # ------------------------------------------------------------------ item 1
-class SkipHooksGuardTests(R4Sandbox, unittest.TestCase):
-    @unittest.skipUnless(HAVE_TOML, 'project mode needs tomllib or tomli')
-    def test_skip_hooks_project_install_refused_over_hooks_only(self):
-        self.ok(self.glob())
-        self.ok(self.proj('--hooks-only'))
-        result = self.proj('--skip-hooks')
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn('als uninstall --hooks-only', result.stderr)
-        self.assertFalse((self.p / '.astra-luna-sol/manifest.json').exists())
-        # Registry dropped but global-form hooks still in hooks.json: refused too.
-        manifest = self.manifest(self.als_home / 'manifest.json')
-        manifest['hooks_projects'] = {}
-        self.write_manifest(manifest, self.als_home / 'manifest.json')
-        result = self.proj('--skip-hooks')
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertFalse((self.p / '.astra-luna-sol/manifest.json').exists())
-
-    @unittest.skipUnless(HAVE_TOML, 'project mode needs tomllib or tomli')
-    def test_als_install_skip_hooks_after_hooks_only(self):
-        self.setup()
-        self.ok(self.als('install', '--hooks-only'))
-        result = self.als('install', '--skip-hooks')
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertNotIn('INSTALL OK', result.stdout)
-        self.ok(self.als('uninstall', '--hooks-only'))
-        self.ok(self.als('install', '--skip-hooks'))
-
-
 # ------------------------------------------------------------------ item 2
-class PlanTemplateTests(R4Sandbox, unittest.TestCase):
-    def test_template_check_writes_no_bytecode(self):
-        self.setup()
-        self.ok(self.als('plan', 'new', 'p.json'))
-        plan = json.loads((self.p / 'p.json').read_text())
-        argv = plan['checks'][0]['argv']
-        self.assertEqual(argv[:2], ['python3', '-B'])
-        tests = self.p / 'tests'
-        tests.mkdir()
-        (tests / 'helper.py').write_text('X = 1\n')
-        (tests / 'test_x.py').write_text('import unittest\nimport helper\n\n'
-                                         'class T(unittest.TestCase):\n    def test(self):\n'
-                                         '        self.assertEqual(helper.X, 1)\n')
-        env = {k: v for k, v in self.env.items() if k != 'PYTHONDONTWRITEBYTECODE'}
-        argv = [sys.executable if argv[0] == 'python3' else argv[0], *argv[1:]]
-        result = subprocess.run(argv, cwd=self.p, capture_output=True, text=True, env=env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(list(self.p.rglob('__pycache__')), [])
-
-
 # ------------------------------------------------------------------ item 3
 class DoctorOutdatedProjectTests(R4Sandbox, unittest.TestCase):
     @unittest.skipUnless(HAVE_TOML, 'project mode needs tomllib or tomli')
@@ -129,50 +81,17 @@ class DoctorOutdatedProjectTests(R4Sandbox, unittest.TestCase):
         self.setup()
         text = self.als('doctor', '--no-probe')
         self.assertEqual(text.returncode, 0, text.stdout + text.stderr)
-        self.assertIn('project install ' + version + ' is outdated: run `als install` (upgrade) or '
-                      '`als uninstall`', text.stdout)
+        self.assertIn('conflict:versions', text.stdout)
+        self.assertIn(version, text.stdout)
+        self.assertIn('still has ALS hooks from a release before 1.2', text.stdout)
         as_json = self.als('doctor', '--no-probe', '--json')
         self.assertEqual(as_json.returncode, 0, as_json.stdout + as_json.stderr)
-        data = json.loads(as_json.stdout)
-        self.assertEqual(set(data), {'deps', 'harness'})
-        self.assertEqual(data['harness']['outdated_project_install'], version)
-        # The README upgrade path then works.
+        self.assertEqual(set(json.loads(as_json.stdout)), {'deps'})
+        # The README upgrade path then works and removes the old hooks.
         self.ok(self.als('install'))
-        self.assertNotIn('is outdated', self.als('doctor', '--no-probe').stdout)
-
-    def test_missing_version_file_counts_as_outdated(self):
-        self.setup()
-        self.fake_project_harness(version=None)
-        result = self.als('doctor', '--no-probe')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('is outdated', result.stdout)
-        self.assertNotIn('FAKE-HARNESS', result.stdout)
-
-    def test_no_deps_passed_only_when_harness_supports_it(self):
-        self.setup()
-        self.fake_project_harness(no_deps=False)
-        out = self.als('doctor', '--no-probe').stdout
-        line = [x for x in out.splitlines() if x.startswith('FAKE-HARNESS')][0]
-        self.assertIn('doctor', line)
-        self.assertNotIn('--no-deps', line)
-        (self.p / '.astra-luna-sol/NO_DEPS').write_text('')
-        for args in (('doctor', '--no-probe'), ('doctor', '--no-probe', '--json')):
-            with self.subTest(args=args):
-                out = self.als(*args).stdout
-                self.assertIn('--no-deps', out)
-
-    def test_real_harness_doctor_omits_deps_when_supported(self):
-        self.setup()
-        self.ok(self.als('install', '--hooks-only'))
-        helptext = subprocess.run([sys.executable, str(ROOT / 'scripts/harness.py'), 'doctor', '--help'],
-                                  capture_output=True, text=True).stdout
-        if '--no-deps' not in helptext:
-            self.skipTest('harness doctor --no-deps not available yet (runtime worker)')
-        out = self.als('doctor', '--no-probe').stdout
-        self.assertIn('\nHarness (', out)
-        # bin/als already printed the dependency report once (bin dir not on PATH: one warning).
-        self.assertEqual(out.count('als-on-path'), 1, out)
-
+        after = self.als('doctor', '--no-probe').stdout
+        self.assertNotIn(version, after)
+        self.assertNotIn('before 1.2', after)
 
 # ------------------------------------------------------------------ item 4
 class RememberedDefaultsTests(R4Sandbox, unittest.TestCase):
@@ -188,19 +107,17 @@ class RememberedDefaultsTests(R4Sandbox, unittest.TestCase):
         env = dict(self.env, ALS_HOME=str(custom), ALS_PYTHON='alspy',
                    PATH=str(shim_dir) + os.pathsep + self.env['PATH'])
         self.setup(env)
-        self.assertTrue((custom / 'harness.py').is_file())
+        self.assertTrue((custom / 'als_flow/flow.py').is_file())
         self.assertFalse(self.als_home.exists())
         bare = {k: v for k, v in env.items() if k not in ('ALS_HOME', 'ALS_PYTHON')}
         marker.unlink()
         version = self.als('version', env=bare)
         self.assertEqual((version.returncode, version.stdout.strip()), (0, VERSION), version.stderr)
-        status = self.als('status', env=bare)
-        self.assertEqual(status.returncode, 0, status.stderr)
+        doctor = self.als('doctor', '--no-probe', env=bare)
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
         self.assertTrue(marker.exists(), 'configured interpreter not used')
         self.ok(self.als('install', '--global', '--check', env=bare))
-        self.ok(self.als('install', '--hooks-only', env=bare))
-        self.assertIn(str(custom), (self.p / '.codex/hooks.json').read_text())
-        self.ok(self.als('uninstall', '--hooks-only', env=bare))
+        self.assertIn(str(custom), (self.bin / 'als-flow').read_text())
         # The environment still overrides the remembered defaults.
         other = dict(bare, ALS_HOME=str(self.base / 'elsewhere'))
         self.assertIn('VERSION not found', self.als('version', env=other).stderr)
@@ -216,7 +133,7 @@ class RememberedDefaultsTests(R4Sandbox, unittest.TestCase):
         env = dict(self.env, ALS_PYTHON=str(shim))
         self.setup(env)
         shim.unlink()
-        result = self.als('status')
+        result = self.als('doctor')
         self.assertEqual(result.returncode, 2)
         self.assertIn(str(shim), result.stderr)
         self.assertNotIn('python3 (3.9+)', result.stderr)
@@ -312,10 +229,9 @@ class OldGitTests(R4Sandbox, unittest.TestCase):
 
     def test_als_and_scripts_from_subdirectory_with_old_git(self):
         self.setup()
-        self.fake_project_harness()
-        status = self.als('status', cwd=self.deep, env=self.oldgit)
-        self.assertEqual(status.stdout.split(), ['FAKE-HARNESS', '--project', os.path.realpath(self.p), 'status'],
-                         status.stderr)
+        init = self.als('harness', 'init', '--dry-run', cwd=self.deep, env=self.oldgit)
+        self.assertIn('WOULD ADD to ' + os.path.join(os.path.realpath(self.p), 'AGENTS.md'), init.stdout,
+                      init.stderr)
         tools = self.base / 'tools'
         tools.mkdir()
         for name in ('usage.sh', 'run.sh'):
@@ -330,7 +246,7 @@ class OldGitTests(R4Sandbox, unittest.TestCase):
         self.assertEqual(run.stdout.strip(), os.path.realpath(self.p), run.stderr)
 
     @unittest.skipUnless(HAVE_TOML, 'project mode needs tomllib or tomli')
-    def test_upgrade_from_5ad6eb6_hook_command(self):
+    def test_upgrade_from_5ad6eb6_removes_hook_command(self):
         old = self.extract('5ad6eb6', 'als-5ad6eb6')
         (self.p / '.codex').mkdir()
         user = {'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'echo u'}]}]}}
@@ -342,11 +258,8 @@ class OldGitTests(R4Sandbox, unittest.TestCase):
         self.assertNotEqual(old_cmd, integration.command('project'))
         self.assertTrue(integration.ALS_COMMAND.search(old_cmd))
         self.assertEqual(self.proj('--check').returncode, 4)
-        self.ok(self.proj())
-        hooks = json.loads((self.p / '.codex/hooks.json').read_text())['hooks']
-        commands = [h['command'] for groups in hooks.values() for g in groups for h in g['hooks']]
-        self.assertNotIn(old_cmd, commands)
-        self.assertEqual(hooks['Stop'][-1]['hooks'][0]['command'], integration.command('project'))
+        self.ok(self.proj())  # 1.2 removes the old ALS groups instead of rewriting them
+        self.assertEqual(json.loads((self.p / '.codex/hooks.json').read_text()), user)
         self.ok(self.proj('--check'))
         self.ok(self.proj('--uninstall'))
         self.assertEqual(json.loads((self.p / '.codex/hooks.json').read_text()), user)
@@ -355,19 +268,17 @@ class OldGitTests(R4Sandbox, unittest.TestCase):
 
 # ------------------------------------------------------------------ item 7
 class DocsTests(unittest.TestCase):
-    def test_hook_command_forms_documented(self):
-        guide = (ROOT / 'docs/harness.md').read_text()
+    def test_install_docs_cover_environment_and_hook_cleanup(self):
         # README is the short quickstart; install details live in docs/install.md.
         install = (ROOT / 'docs/install.md').read_text()
         readme = (ROOT / 'README.md').read_text()
-        self.assertIn(integration.command('project'), guide)
-        for text in (guide, install):
-            self.assertIn('python3 "${HOME:-/home/me}/.local/share/als/harness.py" hook', text)
-        for text in (guide, install, readme):
-            self.assertNotIn('python3 "$HOME/.local/share/als/harness.py" hook', text)
-        for name in ('ALS_DEPS_TIMEOUT', 'ALS_PYTHON', 'ALS_HOME', 'outdated_project_install'):
+        for name in ('ALS_DEPS_TIMEOUT', 'ALS_PYTHON', 'ALS_HOME', 'als uninstall --hooks-only', 'als harness init'):
             self.assertIn(name, install)
         self.assertIn('docs/install.md', readme)
+        self.assertFalse((ROOT / 'docs/harness.md').exists())
+        for text in (install, readme):
+            self.assertNotIn('docs/harness.md', text)
+            self.assertNotIn('als install --hooks-only', text)
 
 
 if __name__ == '__main__':

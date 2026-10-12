@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-from als_harness import cli, deps
+from als_harness import deps
 
 GIT_ENV = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
            'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
@@ -53,7 +53,7 @@ class CodexFeatureProbeTests(TempEnv):
         with self.path_with('[ "$1" = features ] && exit 3\necho "codex-cli 9.9.9"\n'):
             result = deps.check(None)
         items = self.items(result)
-        for name in ('codex-feature:hooks', 'codex-feature:multi_agent'):
+        for name in ('codex-feature:multi_agent',):
             self.assertIsNone(items[name]['ok'])
             self.assertFalse(items[name]['required'])
             self.assertIn('could not run `codex features list`; verify manually', items[name]['hint'])
@@ -61,11 +61,11 @@ class CodexFeatureProbeTests(TempEnv):
         self.assertTrue(result['ok'], result)
 
     def test_disabled_feature_is_still_reported(self):
-        with self.path_with('[ "$1" = features ] && { echo "hooks stable false"; echo "multi_agent stable true"; '
+        with self.path_with('[ "$1" = features ] && { echo "multi_agent stable false"; '
                             'exit 0; }\necho "codex-cli 9.9.9"\n'):
             items = self.items(deps.check(None))
-        self.assertIs(items['codex-feature:hooks']['ok'], False)
-        self.assertEqual(items['codex-feature:hooks']['found'], 'disabled')
+        self.assertIs(items['codex-feature:multi_agent']['ok'], False)
+        self.assertEqual(items['codex-feature:multi_agent']['found'], 'disabled')
 
     def test_missing_codex_is_required_failure(self):
         with patch.dict(os.environ, {'PATH': str(self.base / 'empty')}):
@@ -84,8 +84,8 @@ class CodexFeatureProbeTests(TempEnv):
     def test_features_timeout_is_unknown(self):
         with self.path_with('[ "$1" = features ] && exec sleep 5\necho "codex-cli 9.9.9"\n'):
             items = self.items(deps.check(None, timeout=0.3))
-        self.assertIsNone(items['codex-feature:hooks']['ok'])
-        self.assertIn('did not answer within', items['codex-feature:hooks']['hint'])
+        self.assertIsNone(items['codex-feature:multi_agent']['ok'])
+        self.assertIn('did not answer within', items['codex-feature:multi_agent']['hint'])
 
     def test_no_probe_runs_only_codex_version(self):
         log = self.base / 'calls.log'
@@ -96,7 +96,7 @@ class CodexFeatureProbeTests(TempEnv):
     def test_render_marks_unknown(self):
         with self.path_with('[ "$1" = features ] && exit 3\necho "codex-cli 9.9.9"\n'):
             text = deps.render(deps.check(None))
-        self.assertIn('[unk ] codex-feature:hooks', text)
+        self.assertIn('[unk ] codex-feature:multi_agent', text)
         self.assertIn('dependencies OK', text)
 
 
@@ -119,54 +119,6 @@ class AgentRoleConflictTests(TempEnv):
         with patch.dict(os.environ, {'CODEX_HOME': str(home / '.codex')}):
             item = self.items({'items': deps.conflict_items(project)})['conflict:agent-roles']
         self.assertFalse(item['ok'])
-
-
-class CliTests(TempEnv):
-    def setUp(self):
-        super().setUp()
-        self.project = self.base / 'project'
-        self.project.mkdir()
-        git('init', '-q', cwd=self.project)
-        (self.project / 'source.py').write_text('x=1\n')
-        git('add', 'source.py', cwd=self.project)
-        git('commit', '-q', '-m', 'init', cwd=self.project)
-
-    def main(self, *args):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(['--project', str(self.project), *args])
-        return code, out.getvalue(), err.getvalue()
-
-    def test_doctor_no_deps_skips_dependency_check(self):
-        with patch.object(cli.deps, 'check', side_effect=AssertionError('deps ran')):
-            code, out, err = self.main('doctor', '--no-deps')
-        self.assertEqual(code, 0, err)
-        self.assertNotIn('deps', json.loads(out))
-        with patch.object(cli.deps, 'check', side_effect=AssertionError('deps ran')):
-            code, out, err = self.main('doctor', '--no-deps', '--format', 'text')
-        self.assertEqual(code, 0, err)
-        self.assertNotIn('deps:', out)
-
-    def test_doctor_no_probe_help_names_what_is_skipped(self):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
-            cli.main(['doctor', '--help'])
-        self.assertIn('codex features list', out.getvalue())
-        self.assertIn('--no-deps', out.getvalue())
-
-    def test_status_run_text_is_not_json(self):
-        plan = self.base / 'plan.json'
-        plan.write_text(json.dumps({'goal': 'text status', 'tasks': [{'id': 'one', 'role': 'als_worker'}],
-                                    'checks': [], 'criteria': []}))
-        code, out, err = self.main('start', '--plan', str(plan), '--session', 'sid')
-        rid = json.loads(out)['run']
-        for extra in ((), ('--compact',)):
-            code, out, err = self.main('status', '--run', rid, '--format', 'text', *extra)
-            self.assertEqual(code, 0, err)
-            self.assertTrue(out.startswith('ALS run ' + rid + ': running'), out)
-            self.assertIn('one', out)
-            with self.assertRaises(ValueError):
-                json.loads(out)
 
 
 if __name__ == '__main__':

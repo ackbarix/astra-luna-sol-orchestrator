@@ -1,4 +1,4 @@
-# Astra–Luna–Sol Orchestrator · 1.1.0
+# Astra–Luna–Sol Orchestrator · 1.2.0
 
 Codex에서 GPT 모델로 **프로젝트에 맞는 에이전트 팀(하네스)**을 만들고 운영하는 도구입니다.
 [revfactory/harness](https://github.com/revfactory/harness) v2와 같은 방식이며, 모델만 GPT를 씁니다.
@@ -106,29 +106,12 @@ $astra-luna-sol
 
 Codex 안에서 `/status`를 입력하면 Astra 모델이 쓰이는지 확인할 수 있습니다.
 
-### (선택) 작업 관리 하네스
-
-여러 워커가 같은 파일을 동시에 고치지 않게 막고, 선언한 테스트가 통과해야 완료로
-인정받게 하려면 그 저장소에서 한 번만 실행하세요.
-
-```bash
-cd ~/work/my-app
-als install --hooks-only
-```
-
-그다음 Codex에서 `/hooks`를 열어 ALS 훅을 검토하고 신뢰해 주세요.
-저장소에는 `.codex/hooks.json` 하나만 생기고, 작업 기록은 저장소 밖에 저장됩니다.
-계획을 등록하는 방법은 [하네스 가이드](docs/harness.md)에 있습니다.
-
 ## 5. 자주 쓰는 명령
 
 | 명령 | 하는 일 |
 |---|---|
 | `als doctor` | 설치·의존성 점검 |
 | `als run` | Astra 설정으로 Codex 시작 |
-| `als install --hooks-only` | 현재 저장소에 하네스 훅 켜기 |
-| `als uninstall --hooks-only` | 현재 저장소의 하네스 훅 끄기 |
-| `als status --format text` | 진행 중인 관리 작업 보기 |
 | `als usage` | 최근 세션의 토큰 사용량 |
 | `als version` | 설치된 버전 |
 | `als-flow run`, `status`, `ls` | 워크플로 실행·상태 (`_workspace/.flow/`) |
@@ -147,24 +130,25 @@ sh setup.sh                  # 업데이트 (다시 설치)
 als uninstall --global       # 전체 제거
 ```
 
+**1.1 이하에서 올라올 때:** 1.2부터 작업 관리 하네스(훅, 파일 예약, 완료 인증, `als start`·`als status` 등)가
+없어졌습니다. `sh setup.sh`가 전역에 설치된 이전 파일을 지웁니다. 프로젝트에 훅을 켜 두었다면
+그 저장소에서 `als uninstall --hooks-only`를 한 번 실행하세요(`als doctor`가 알려 줍니다).
+남은 훅은 아무 일도 하지 않으므로 급하지 않습니다.
+
 **0.2–0.4를 쓰던 저장소:** `als doctor`가 이전 프로젝트 설치를 알려 줍니다.
-`als uninstall ~/work/my-app`으로 이전 설치를 지운 뒤, 필요하면 그 저장소에서
-`als install --hooks-only`를 실행하세요.
+`als uninstall ~/work/my-app`으로 이전 설치를 지우세요.
 
 ## 7. 문제가 생기면
 
 | 증상 | 해결 |
 |---|---|
 | `als: command not found` | `setup.sh`가 출력한 `export PATH=...` 줄을 셸 설정에 추가 |
-| `als doctor`에 `[FAIL] codex-feature:hooks` | `codex features enable hooks` |
 | `als doctor`에 `[FAIL] codex-feature:multi_agent` | `codex features enable multi_agent` |
 | `als doctor`에 `conflict:` 경고 | 이전 프로젝트 설치가 남아 있음. 위 "0.2–0.4를 쓰던 저장소" 참고 |
 | 설치·제거가 `REFUSED`로 멈춤 | 출력된 해결 명령을 그대로 실행 (사용자 파일은 덮어쓰지 않음) |
 
 그 밖의 세부 사항은 다음 문서를 보세요.
 - [설치·업그레이드·복구 상세](docs/install.md): 환경 변수, 전역/프로젝트 모드, 복구 플래그
-- [하네스 가이드](docs/harness.md): 작업 계획, 수명 주기, 검증
-- [효율 가이드](docs/efficiency.md): 위임 정책
 - [검증 가이드](docs/validation.md): 사용량 리포트
 
 ## 역할 구성
@@ -181,9 +165,8 @@ als uninstall --global       # 전체 제거
 
 ## 알아 둘 한계
 
-- **보안 장치가 아닙니다.** 파일 예약은 협조를 전제로 한 충돌 방지이고, OS 수준 차단이 없습니다.
+- **보안 장치가 아닙니다.** 작업자끼리 같은 파일을 나누지 않는 것은 규칙일 뿐, 강제 장치가 없습니다.
 - 읽기 전용 역할의 "읽기 전용"은 지시일 뿐 강제되지 않습니다(하위 에이전트는 부모의 샌드박스를 물려받음).
-- 훅에 오류가 나거나 신뢰되지 않으면 Codex는 막지 않고 계속 진행합니다.
 - 토큰 예산은 새 작업을 줄이는 기준일 뿐 청구액 상한이 아닙니다.
 - 이 릴리스는 유료 모델로 실측하지 않았습니다. 비용 절감이나 성능 향상은 보장하지 않습니다.
 

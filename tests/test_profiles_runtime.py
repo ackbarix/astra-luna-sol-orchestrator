@@ -15,8 +15,7 @@ class ContractTests(unittest.TestCase):
             self.assertEqual((data['model'],data['model_reasoning_effort']),pair)
             self.assertEqual(data['name'],role)
     def test_all_luna_roles_and_roleless_children_use_max(self):
-        from als_harness.common import ROLES
-        self.assertTrue(all(effort=='max' for model,effort,_ in ROLES.values() if model=='gpt-6-luna'))
+        self.assertTrue(all(effort=='max' for model,effort in checker.EXPECTED.values() if model=='gpt-6-luna'))
         config=tomllib.loads((ROOT/'profiles/config.toml').read_text())
         self.assertEqual(config['agents']['default_subagent_reasoning_effort'],'max')
     def test_reviewers_read_only(self):

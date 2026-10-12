@@ -1,6 +1,5 @@
-"""Installer/hook coexistence and installed entrypoint tests, no Codex calls."""
+"""Project installer: no hooks, user hooks untouched, runtime data preserved; no Codex calls."""
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -18,40 +17,21 @@ import install
 ROOT=Path(__file__).resolve().parents[1]
 
 
-FAKE_CODEX = ('#!/bin/sh\nif [ "$1" = features ]; then printf "hooks stable true\\nmulti_agent stable true\\n"; '
-              'else echo "codex-cli 9.9.9"; fi\n')
-
-
-def fake_codex_dir(base):
-    """Directory holding a fake `codex` so doctor never depends on the host's Codex CLI."""
-    folder = Path(base) / 'fake-bin'
-    folder.mkdir(exist_ok=True)
-    exe = folder / 'codex'
-    exe.write_text(FAKE_CODEX)
-    exe.chmod(0o755)
-    ocx = folder / 'ocx'  # deps also runs `ocx --version`
-    ocx.write_text('#!/bin/sh\necho ocx 0.0.0\n')
-    ocx.chmod(0o755)
-    return folder
-
 class HarnessInstallTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.p=Path(self.tmp.name)/'project';self.p.mkdir()
         subprocess.run(['git','init','-q',str(self.p)],check=True)
     def tearDown(self):self.tmp.cleanup()
     def call(self,*args):return subprocess.run([sys.executable,str(ROOT/'install.py'),'--target',str(self.p),*args],capture_output=True,text=True)
-    def test_hook_and_modules_installed_bare_codex_config(self):
+    def test_install_has_tools_but_no_hooks_or_managed_harness(self):
         r=self.call();self.assertEqual(r.returncode,0,r.stderr)
-        self.assertTrue((self.p/'.codex/hooks.json').exists())
-        for name in ('harness.py','als_harness/state.py','als_harness/engine.py','harness-guide.md'):
-            self.assertTrue((self.p/'.astra-luna-sol'/name).is_file())
-        # A fake codex on PATH: the result must not depend on the host's Codex install.
-        env=dict(os.environ,PATH=str(fake_codex_dir(self.tmp.name))+os.pathsep+os.environ.get('PATH',''))
-        r=subprocess.run([sys.executable,str(self.p/'.astra-luna-sol/harness.py'),'doctor'],capture_output=True,text=True,env=env)
-        self.assertEqual(r.returncode,0,r.stderr)
-        d=json.loads(r.stdout);self.assertTrue(d['hooks_configured']);self.assertFalse(d['paid_model_calls'])
-        self.assertIn('codex-cli 9.9.9',[i['found'] for i in d['deps']['items'] if i['name']=='codex'])
-        self.assertFalse((self.p/'.astra-luna-sol/state').exists())
+        self.assertFalse((self.p/'.codex/hooks.json').exists())
+        rt=self.p/'.astra-luna-sol'
+        for name in ('als_flow/flow.py','als_harness/deps.py','token_usage.py','VERSION'):
+            self.assertTrue((rt/name).is_file(),name)
+        for name in ('harness.py','harness-guide.md','efficiency-guide.md','als_harness/engine.py','als_harness/cli.py'):
+            self.assertFalse((rt/name).exists(),name)
+        self.assertFalse((rt/'state').exists())
     def test_user_hooks_survive_upgrade_uninstall(self):
         self.p.joinpath('.codex').mkdir()
         hooks=self.p/'.codex/hooks.json';original={'description':'user','hooks':{'Stop':[{'hooks':[{'type':'command','command':'echo hello'}]}]}}
@@ -59,18 +39,6 @@ class HarnessInstallTests(unittest.TestCase):
         self.assertEqual(self.call().returncode,0);self.assertEqual(self.call('--check').returncode,0)
         self.assertEqual(self.call().returncode,0);self.assertEqual(self.call('--uninstall').returncode,0)
         self.assertEqual(json.loads(hooks.read_text()),original)
-    def test_edited_managed_hook_refused_without_writes(self):
-        self.assertEqual(self.call().returncode,0)
-        p=self.p/'.codex/hooks.json';p.write_text(p.read_text().replace('ALS harness','Changed'))
-        before=(self.p/'.codex/config.toml').read_bytes()
-        self.assertEqual(self.call().returncode,2)
-        self.assertEqual(before,(self.p/'.codex/config.toml').read_bytes())
-    def test_inline_hook_conflict_or_cli_only(self):
-        cfg=self.p/'.codex/config.toml';cfg.parent.mkdir();cfg.write_text('[[hooks.Stop]]\nmatcher="*"\n')
-        self.assertEqual(self.call().returncode,2)
-        self.assertFalse((self.p/'.astra-luna-sol').exists())
-        self.assertEqual(self.call('--skip-hooks').returncode,0)
-        self.assertFalse((self.p/'.codex/hooks.json').exists())
     def test_uninstall_preserves_runtime_data_and_ignore(self):
         self.assertEqual(self.call().returncode,0)
         runtime=self.p/'.astra-luna-sol/state';runtime.mkdir();(runtime/'user-note').write_text('keep')
@@ -124,16 +92,17 @@ class HarnessInstallTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertFalse((target/'manifest.json').exists())
 
-    def test_hooks_removed_when_skip_selected(self):
-        self.assertEqual(self.call().returncode,0)
+    def test_skip_hooks_is_accepted_and_inline_hooks_are_left_alone(self):
+        cfg=self.p/'.codex/config.toml';cfg.parent.mkdir();cfg.write_text('[[hooks.Stop]]\nmatcher="*"\n')
         self.assertEqual(self.call('--skip-hooks').returncode,0)
         self.assertFalse((self.p/'.codex/hooks.json').exists())
-        self.assertEqual(self.call('--skip-hooks','--check').returncode,0)
+        self.assertIn('[[hooks.Stop]]',cfg.read_text())
+        self.assertEqual(self.call('--check').returncode,0)
     def test_legacy_02_manifest_is_upgradable(self):
-        self.assertEqual(self.call('--skip-hooks').returncode,0)
+        self.assertEqual(self.call().returncode,0)
         mf=self.p/'.astra-luna-sol/manifest.json';m=json.loads(mf.read_text())
         m['version']='0.2.0';m.pop('hooks',None)
-        new=[k for k in m['files'] if 'als_harness' in k or k.endswith(('harness.py','harness-guide.md','.gitignore'))]
+        new=[k for k in m['files'] if 'als_harness' in k or k.endswith('.gitignore')]
         for k in new:m['files'].pop(k);(self.p/k).unlink()
         mf.write_text(json.dumps(m))
         self.assertEqual(self.call().returncode,0)
