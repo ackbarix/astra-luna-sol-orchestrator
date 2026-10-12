@@ -2,7 +2,7 @@
 name: astra-luna-sol
 description: Cost-aware coding delegation for substantial independent work; skip trivial edits and simple questions.
 ---
-# ALS 0.4 — finish the work, not the orchestration ceremony
+# Astra–Luna–Sol — finish the work, not the orchestration ceremony
 
 HEAD is Astra Medium. Keep architecture, priorities and integration here. Simple
 lookups/one-line edits are direct work: do not create a run or worker just to show
@@ -13,8 +13,8 @@ successful result. Bundle related small tasks. Reuse a relevant worker for follo
 
 | Task | Role | Requested effort |
 |---|---|---|
-| Bounded search / primary-source research | als_explorer / als_researcher | Luna Medium |
-| Existing checks and simple reproductions | als_tester | Luna Medium |
+| Bounded search / primary-source research | als_explorer / als_researcher | Luna Max |
+| Existing checks and simple reproductions | als_tester | Luna Max |
 | Bounded implementation | als_worker | Luna Max |
 | Difficult test design/failure analysis | als_test_designer | Luna Max |
 | Complex implementation/analysis | als_hard_worker | Sol 6.1 High |
@@ -24,6 +24,20 @@ successful result. Bundle related small tasks. Reuse a relevant worker for follo
 Do not lower safety-critical reasoning to save tokens. Route obviously hard work
 directly; never manufacture a Luna failure. Roles pin effort in TOML. A different
 role requires an explained override; prose does not change runtime model settings.
+
+## Verification: once, proportional to risk
+
+Verification is a cost, not a goal. Finish when the acceptance check passes.
+- While editing: the narrowest relevant test only. Never the full suite mid-change.
+- At the end: the acceptance check once. Passing means done; do not repeat it, re-read the
+  files you wrote, or run extra `git diff`/`status` rounds to reassure yourself.
+- On failure: fix, re-run only the failing tests, then the acceptance check once more.
+- Trivial or docs-only changes: no extra verification. Normal changes: no reviewer.
+  Security/state/concurrency/data-loss changes: one `als_reviewer_deep` pass on the final
+  diff. Never a second review of unchanged code.
+- Do not create monitor, watcher or per-step verifier tasks. Do not ask a worker to check
+  another worker's passing result again.
+- If something cannot be verified quickly, say "unverified" in the report and stop.
 
 ## Managed work
 

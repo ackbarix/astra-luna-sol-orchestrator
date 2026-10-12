@@ -11,8 +11,9 @@ Usage: als COMMAND [ARGS]
                                        --skip-hooks --policy-file PATH --force-uninstall
   uninstall [PROJECT|--global] [FLAGS] remove ALS (same as install ... --uninstall)
   doctor [--no-probe] [--json]         check dependencies, then the harness in this project
-  run [CODEX ARGS]                     start Codex (`codex --profile als` when installed globally)
+  run [CODEX ARGS]                     start Codex directly (no proxy; `--profile als` when installed globally)
   plan new FILE                        write a minimal plan JSON template
+  harness diff|apply                   install a harness staged in _workspace/harness-staging
   usage [ARGS]                         token usage report for this project (token_usage.py);
                                        --latest unless --list/--root/--day/--latest* is given
   status|start|prepare|finish|verify|complete|report|resume|... [ARGS]
@@ -85,6 +86,14 @@ harness() {
  else
   return 1
  fi
+}
+
+flow_pkg() {
+ root=$(project_root 2>/dev/null) || root=
+ for dir in "$root/.astra-luna-sol" "$als_home" "$release"; do
+  [ -n "$dir" ] && [ -f "$dir/als_flow/__init__.py" ] && { printf '%s\n' "$dir"; return 0; }
+ done
+ return 1
 }
 
 installer() {
@@ -233,6 +242,17 @@ case $cmd in
  plan) plan_new "$@" ;;
  run)
   command -v codex >/dev/null 2>&1 || die "codex not found on PATH (npm i -g @openai/codex)"
+  # Talk to the GPT endpoint directly, bypassing any proxy (e.g. OpenCodex) that
+  # config.toml points at. ALS_CODEX_BASE_URL overrides; set it empty to keep config.toml.
+  if [ "${ALS_CODEX_BASE_URL+set}" = set ]; then
+   url=$ALS_CODEX_BASE_URL
+  else
+   case $(codex login status 2>&1) in
+    *"API key"*|*"api key"*) url=https://api.openai.com/v1 ;;
+    *) url=https://chatgpt.com/backend-api/codex ;;
+   esac
+  fi
+  if [ -n "$url" ]; then set -- -c "openai_base_url=\"$url\"" "$@"; fi
   if [ -f "$codex_home/als.config.toml" ]; then exec codex --profile als "$@"; fi
   exec codex "$@" ;;
  usage)
@@ -250,6 +270,12 @@ case $cmd in
    esac
   done
   exec "$py" "$tu" --cwd "$root" "$@" $select ;;
+ harness)
+  # Install a harness staged under _workspace/harness-staging/ into .codex/agents and
+  # .agents/skills (paths the Codex sandbox keeps read-only for the agent itself).
+  need_python
+  pkg=$(flow_pkg) || die "als_flow not installed; run: als install --global"
+  PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" exec "$py" -m als_flow.apply "$@" ;;
  hook) die "hooks are run by Codex, not by als" ;;
  -*) usage >&2; exit 2 ;;
  *)

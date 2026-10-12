@@ -17,6 +17,7 @@ FAKE_CODEX = '''#!/bin/sh
 case "$1" in
  --version) echo "codex-cli 9.9.9" ;;
  features) printf 'hooks    stable  %s\\nmulti_agent    stable  true\\n' "${FAKE_HOOKS:-true}" ;;
+ login) echo "${FAKE_LOGIN:-Logged in using ChatGPT}" ;;
  *) echo "FAKE CODEX $*" ;;
 esac
 '''
@@ -177,7 +178,7 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
         self.assertIn('codex features enable hooks', doctor.stdout)
         self.env.pop('FAKE_HOOKS')
         run = self.als('run', '--foo')
-        self.assertEqual(run.stdout.strip(), 'FAKE CODEX --profile als --foo')
+        self.assertEqual(run.stdout.strip(), 'FAKE CODEX --profile als -c openai_base_url="https://chatgpt.com/backend-api/codex" --foo')
         self.ok(self.als('install', '--hooks-only'))
         self.assertTrue((self.p / '.codex/hooks.json').is_file())
         sub = self.p / 'sub'
@@ -269,7 +270,18 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
     def test_als_run_without_profile_uses_plain_codex(self):
         self.ok(self.glob())
         (self.codex_home / 'als.config.toml').rename(self.base / 'saved')
-        self.assertEqual(self.als('run').stdout.strip(), 'FAKE CODEX')
+        self.assertEqual(self.als('run').stdout.strip(), 'FAKE CODEX -c openai_base_url="https://chatgpt.com/backend-api/codex"')
+
+    def test_als_run_endpoint_bypasses_proxy_and_follows_login(self):
+        """als run talks to the GPT endpoint directly (no OpenCodex) unless told otherwise."""
+        self.ok(self.glob())
+        self.env['FAKE_LOGIN'] = 'Logged in using an API key - sk-***'
+        self.assertIn('-c openai_base_url="https://api.openai.com/v1"', self.als('run').stdout)
+        del self.env['FAKE_LOGIN']
+        self.env['ALS_CODEX_BASE_URL'] = ''
+        self.assertEqual(self.als('run', '--x').stdout.strip(), 'FAKE CODEX --profile als --x')
+        self.env['ALS_CODEX_BASE_URL'] = 'http://127.0.0.1:10100/v1'
+        self.assertIn('-c openai_base_url="http://127.0.0.1:10100/v1"', self.als('run').stdout)
 
     def test_setup_bootstrap(self):
         result = subprocess.run(['sh', str(ROOT / 'setup.sh')], capture_output=True, text=True, env=self.env)

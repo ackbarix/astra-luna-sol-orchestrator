@@ -66,6 +66,8 @@ smoke 세트 밖의 추가 역할은 `warnings` 메모로만 남기고 실패시
 
 ## 3. 최초 비교안
 
+아래는 0.2 당시의 비교안입니다. 현재 설정은 모든 Luna 역할과 역할 없는 하위 에이전트에 Max를 사용합니다.
+
 A(기존): Astra Medium 총괄, Luna 전체 Max, Sol High 구현/Medium 검수.
 B(0.2): Astra Medium 총괄, Luna 구현 Max, 탐색/자료조사/기본 테스트 Medium,
 필요한 경우 전용 깊은 테스트/검수 역할. 동시 상한은 둘 다 6.

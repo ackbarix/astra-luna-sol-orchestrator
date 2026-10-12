@@ -1,7 +1,7 @@
 # ALS 0.5.0 — 호출·맥락·추론 수준·실측 최적화
 
 설정의 목표는 최저 토큰 숫자가 아니라 **검증된 작업 하나를 끝내는 전체 사용량과 시간**입니다.
-Astra Medium 총괄, Luna Medium/Max, Sol 6.1 High/Medium은 유지합니다. 별도 감독 AI,
+Astra Medium 총괄, Luna Max 역할, Sol 6.1 High/Medium은 유지합니다. 별도 감독 AI,
 자동 모델 평가, 클라우드 업로드는 추가하지 않습니다. 실제 절감률은 아직 측정하지 않았습니다.
 
 ## 적용 범위
@@ -18,7 +18,7 @@ PreToolUse 경로의 거절 결정입니다. 훅이 우회되거나 꺼져 있�
 
 - 사소한(low-risk + trivial) 작업은 HEAD가 직접 처리합니다. 독립 검토 등 특별한 이유가
   있으면 구체적인 `delegation_reason`으로 설명합니다. 테스트 이름만 붙여 무조건 호출하지 않습니다.
-- 탐색/자료 조사/단순 검증은 Luna Medium, 일반 구현/복잡한 테스트 설계는 Luna Max,
+- 탐색/자료 조사/테스트 실행/일반 구현/테스트 설계는 각 Luna 역할(Max)을 고릅니다.
   복잡한 핵심 작업은 Sol High, 검수는 위험도에 따라 Sol Medium/High를 고릅니다.
 - 읽기 전용 kind(exploration, research, review)는 난도·위험도와 관계없이 **항상 읽기 전용 역할**에
   남습니다. 복잡하거나 고위험인 탐색·조사에는 역할을 올리지 않고 준비된 task에

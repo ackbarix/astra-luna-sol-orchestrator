@@ -135,8 +135,13 @@ class LegacyUpgradeUninstallTests(R3Sandbox, unittest.TestCase):
                                 capture_output=True, text=True, env=self.env)
         self.assertEqual(legacy.returncode, 0, legacy.stderr)
         self.ok(self.proj())
+        # Allowed: legacy ALS dirs, .codex, and parents of files this release installs.
+        allowed = set(install.LEGACY_DIRS + ['.codex'])
+        for key in install.project_sources():
+            parts = key.split('/')[:-1]
+            allowed.update('/'.join(parts[:i]) for i in range(1, len(parts) + 1))
         for rel in self.manifest()['created_dirs']:
-            self.assertIn(rel, install.LEGACY_DIRS + ['.codex'])
+            self.assertIn(rel, allowed)
 
 
 # ------------------------------------------------------------------ item 2

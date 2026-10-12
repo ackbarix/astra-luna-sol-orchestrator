@@ -24,9 +24,9 @@ except ModuleNotFoundError:
         TOML_PARSER = "minimal"
 
 EXPECTED = {
-    "als_explorer": ("gpt-6-luna", "medium"),
-    "als_researcher": ("gpt-6-luna", "medium"),
-    "als_tester": ("gpt-6-luna", "medium"),
+    "als_explorer": ("gpt-6-luna", "max"),
+    "als_researcher": ("gpt-6-luna", "max"),
+    "als_tester": ("gpt-6-luna", "max"),
     "als_worker": ("gpt-6-luna", "max"),
     "als_test_designer": ("gpt-6-luna", "max"),
     "als_hard_worker": ("gpt-6.1-sol", "high"),

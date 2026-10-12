@@ -116,7 +116,7 @@ class IndexWarningIsolationTests(Fixture, unittest.TestCase):
         self.assertTrue(any('missing_root_metadata:ghost' in w for w in report['warnings']))
 
     def test_check_runtime_report_not_failed_by_unrelated_files(self):
-        roles = {'root': ('gpt-6-astra', 'medium'), 'als_explorer': ('gpt-6-luna', 'medium'),
+        roles = {'root': ('gpt-6-astra', 'medium'), 'als_explorer': ('gpt-6-luna', 'max'),
                  'als_worker': ('gpt-6-luna', 'max'), 'als_hard_worker': ('gpt-6.1-sol', 'high'),
                  'als_reviewer': ('gpt-6.1-sol', 'medium')}
         for role, (model, effort) in roles.items():

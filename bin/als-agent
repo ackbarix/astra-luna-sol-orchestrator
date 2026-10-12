@@ -1,0 +1,8 @@
+#!/bin/sh
+# als-agent — Persistent named Codex agents (Claude Code Agent(name:) + SendMessage equivalent).
+# POSIX sh wrapper: runs the als_flow.agent module with this checkout on PYTHONPATH.
+set -eu
+pkg_parent=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHONPATH="$pkg_parent${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+exec "${ALS_PYTHON:-python3}" -m als_flow.agent "$@"

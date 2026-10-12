@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.0 — Harness v2 for GPT
+
+ALS now follows [revfactory/harness](https://github.com/revfactory/harness) v2; the only difference is
+that GPT models run through Codex.
+
+- New skills `harness` (team factory, phases 0-7, 9 references) and `harness-evolve`, ported from
+  Harness v2 (Apache-2.0, see `harness/NOTICE.md`). They generate `.codex/agents/*.toml`,
+  `.agents/skills/*/SKILL.md`, an orchestrator skill and an `AGENTS.md` pointer.
+- Model tiers: fable → gpt-6-astra, opus → gpt-6.1-sol, sonnet → gpt-6-luna (always max).
+- New runtime for the Claude-Code-only execution modes: `als-flow` (Workflow scripts in Python:
+  `agent()`, `pipeline()`, `parallel()`, `phase()`, JSON schema results, resume, budget, call cap),
+  `als-agent` (persistent named agents via `codex exec resume`) and `als-task` (shared task list).
+  Verified with real GPT calls (schema results, remembered context).
+- Verification: GPT verifies once and stops by default; the Harness quality patterns
+  (adversarial verification, judge panel, loop-until-dry) are used only when correctness is
+  critical or a thorough sweep is requested, as in the original.
+- Every Luna role pinned to max; `als run` connects to the GPT endpoint directly (no OpenCodex).
+- The installer ships all of the above (global and project mode).
+
 ## 0.5.0 — global install, `als` command, recovery and state-engine fixes
 
 ### Install and use
