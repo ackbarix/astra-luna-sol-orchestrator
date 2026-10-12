@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 — Generic harness
+
+- `$astra-luna-sol` rewritten as a ready-to-use Harness v2 orchestrator (mixed mode, agent table,
+  steps 0–4, data handoff, error handling, test scenarios) over the eight global als_* roles.
+- `als harness init` applies it to a project by adding only a Harness-format AGENTS.md section
+  (trigger condition + change log).
+- Ideas from oh-my-openagent's ultrawork (MIT): one real-usage check for user-visible changes,
+  one plan review before large work. Its repeated review loops are deliberately not adopted.
+
 ## 1.0.0 — Harness v2 for GPT
 
 ALS now follows [revfactory/harness](https://github.com/revfactory/harness) v2; the only difference is

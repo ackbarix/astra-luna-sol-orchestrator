@@ -1,4 +1,10 @@
-"""als harness diff|apply: install a staged harness into the protected Codex paths.
+"""als harness init|diff|apply: apply the generic ALS harness, or install a staged one.
+
+`als harness init` applies the ready-made generic team (the global
+`astra-luna-sol` skill and als_* roles) to a project the Harness v2 way: it
+adds only a short AGENTS.md section with the trigger condition and a change
+log. Nothing else is written to the project.
+
 
 Codex's workspace-write sandbox keeps `.codex/` and `.agents/` read-only for the
 agent itself, so the `harness` skill builds the team under
@@ -19,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -112,12 +119,51 @@ def plan(files, root):
     return out
 
 
+GENERIC_HEADING = '## 하네스: 범용 개발 팀 (Astra–Luna–Sol)'
+
+
+def generic_section(date):
+    return (GENERIC_HEADING + '\n\n'
+            '**목표:** 여러 단계가 필요한 코딩 작업을 GPT 역할 팀(Astra 총괄, Luna 실무, Sol 고난도·검수)으로 나눠 처리한다.\n\n'
+            '**호출 조건:** 기능 추가, 버그 수정, 리팩터링, 코드 리뷰, 원인 분석, 기술 조사처럼 여러 단계가 필요한 작업을 '
+            '요청받으면 `$astra-luna-sol` 스킬을 사용한다. 단순 질문과 한 줄 수정에는 직접 답해도 된다.\n\n'
+            '**변경 이력:**\n'
+            '| 날짜 | 변경 내용 | 대상 | 사유 |\n'
+            '| --- | --- | --- | --- |\n'
+            '| ' + date + ' | ALS 범용 하네스 적용 | 전체 | - |\n')
+
+
+def init(root, dry_run):
+    agents_md = root / 'AGENTS.md'
+    if agents_md.is_symlink():
+        print('REFUSED: %s is a symlink; add the section to its target yourself' % agents_md)
+        return 2
+    text = agents_md.read_text(encoding='utf-8') if agents_md.exists() else ''
+    if GENERIC_HEADING in text:
+        print('ALREADY APPLIED: %s has the generic harness section' % agents_md)
+        return 0
+    section = generic_section(time.strftime('%Y-%m-%d'))
+    codex_home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+    if not (codex_home / 'skills/astra-luna-sol/SKILL.md').is_file():
+        print('warn  the astra-luna-sol skill is not installed in %s; run: als install --global' % codex_home)
+    print(('WOULD ADD' if dry_run else 'ADD') + ' to ' + str(agents_md) + ':\n\n' + section)
+    if dry_run:
+        return 0
+    separator = '' if not text else ('\n' if text.endswith('\n') else '\n\n')
+    agents_md.write_text(text + separator + section, encoding='utf-8')
+    print('APPLIED: start Codex (als run) and ask for multi-step work; it uses $astra-luna-sol.')
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='als harness', description=__doc__.split('\n\n')[0])
-    parser.add_argument('cmd', choices=('diff', 'apply'))
+    parser.add_argument('cmd', choices=('init', 'diff', 'apply'))
+    parser.add_argument('--dry-run', action='store_true', help='init: show the AGENTS.md section only')
     parser.add_argument('--staging', help='staging directory (default: _workspace/harness-staging)')
     args = parser.parse_args(argv)
     root = project_root()
+    if args.cmd == 'init':
+        return init(root, args.dry_run)
     staging = Path(args.staging).resolve() if args.staging else root / STAGING
     if not staging.is_dir():
         print('als harness: no staged harness at %s' % staging, file=sys.stderr)

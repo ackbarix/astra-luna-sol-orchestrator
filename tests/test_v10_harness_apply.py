@@ -85,5 +85,43 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(self.als('diff').returncode, 2)
 
 
+class InitTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.p = Path(self.tmp.name) / 'proj'
+        self.p.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.p)], check=True)
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith('ALS_')}
+        self.env['CODEX_HOME'] = str(Path(self.tmp.name) / 'codex')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def init(self, *args):
+        return subprocess.run(['sh', str(ROOT / 'bin/als'), 'harness', 'init', *args], cwd=self.p,
+                              capture_output=True, text=True, env=self.env, timeout=60)
+
+    def test_appends_section_once_and_keeps_existing_text(self):
+        agents = self.p / 'AGENTS.md'
+        agents.write_text('# 기존 규칙\n\n사용자 내용')
+        dry = self.init('--dry-run')
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertEqual(agents.read_text(), '# 기존 규칙\n\n사용자 내용')
+        first = self.init()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn('not installed', first.stdout)
+        text = agents.read_text()
+        self.assertTrue(text.startswith('# 기존 규칙\n\n사용자 내용\n\n## 하네스: 범용 개발 팀'))
+        for part in ('**호출 조건:**', '`$astra-luna-sol`', '**변경 이력:**', '| 날짜 | 변경 내용 | 대상 | 사유 |'):
+            self.assertIn(part, text)
+        self.assertIn('ALREADY APPLIED', self.init().stdout)
+        self.assertEqual(agents.read_text(), text)
+
+    def test_creates_agents_md_and_writes_nothing_else(self):
+        self.assertEqual(self.init().returncode, 0)
+        created = sorted(p.name for p in self.p.iterdir() if p.name != '.git')
+        self.assertEqual(created, ['AGENTS.md'])
+
+
 if __name__ == '__main__':
     unittest.main()

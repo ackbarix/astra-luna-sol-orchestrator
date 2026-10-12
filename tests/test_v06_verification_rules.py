@@ -18,12 +18,17 @@ class VerificationRuleTests(unittest.TestCase):
         self.assertIn('acceptance check once', snippet)
         self.assertIn('unverified', snippet)
 
-    def test_skill_has_verification_section_before_managed_work(self):
+    def test_generic_harness_skill_keeps_verify_once(self):
+        """The generic harness (astra-luna-sol) is a Harness v2 orchestrator with the verify-once rule."""
         skill = (ROOT / 'profiles/skills/astra-luna-sol/SKILL.md').read_text()
-        self.assertLess(skill.index('## Verification: once'), skill.index('## Managed work'))
-        for phrase in ('narrowest relevant test', 'acceptance check once', 'Never a second review',
-                       'monitor, watcher or per-step verifier'):
+        for section in ('## 실행 모드: 혼합', '## 에이전트 구성', '### 0단계: 기존 작업 확인',
+                        '## 검증: 한 번, 위험도에 비례', '## 오류 처리', '## 테스트 시나리오'):
+            self.assertIn(section, skill)
+        for phrase in ('가장 좁은 관련 테스트만', '마지막에 완료 조건을 한 번 확인한다',
+                       '바뀌지 않은 코드를 다시 검수하지 않는다', '감시·검증 작업을 따로 만들지 않는다',
+                       '"미확인"', '계획 검토는 반복하지 않는다'):
             self.assertIn(phrase, skill)
+        self.assertLess(len(skill.splitlines()), 500)
 
     def test_every_role_has_a_stop_rule(self):
         roles = sorted((ROOT / 'profiles/agents').glob('als_*.toml'))

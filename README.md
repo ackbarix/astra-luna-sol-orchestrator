@@ -1,4 +1,4 @@
-# Astra–Luna–Sol Orchestrator · 1.0.0
+# Astra–Luna–Sol Orchestrator · 1.1.0
 
 Codex에서 GPT 모델로 **프로젝트에 맞는 에이전트 팀(하네스)**을 만들고 운영하는 도구입니다.
 [revfactory/harness](https://github.com/revfactory/harness) v2와 같은 방식이며, 모델만 GPT를 씁니다.
@@ -28,13 +28,28 @@ als doctor        # 필요한 프로그램이 다 있는지 점검
 ```
 
 `[FAIL]`이 있으면 그 줄의 안내대로 고친 뒤 다시 실행하세요. `[warn]`은 대개 무시해도 되지만,
-`conflict:`로 시작하는 경고는 [6절](#6-문제가-생기면)을 보고 처리하세요.
+`conflict:`로 시작하는 경고는 [7절](#7-문제가-생기면)을 보고 처리하세요.
 
 **필요한 것:** Linux 또는 macOS, Python 3.9 이상, git, Codex CLI.
 설치는 셸 설정 파일이나 기존 Codex 설정(`~/.codex/config.toml`)을 바꾸지 않습니다.
 무엇이 설치될지 미리 보려면 `sh setup.sh --dry-run`을 실행하세요(아무것도 쓰지 않음).
 
-## 2. 하네스 만들기 (핵심 기능)
+## 2. 프로젝트에 하네스 적용 (범용 팀)
+
+설치에 이미 만들어진 범용 개발 팀(Astra 총괄, Luna 실무, Sol 고난도·검수)이 들어 있습니다. 프로젝트에는
+한 번만 적용하면 됩니다.
+
+```bash
+cd /path/to/project
+als harness init --dry-run   # 추가될 내용 미리 보기
+als harness init             # AGENTS.md에 호출 조건과 변경 이력 섹션 추가 (다른 파일은 만들지 않음)
+als run
+```
+
+그다음 Codex에 평소처럼 "이 버그 고쳐줘", "이 기능 추가해줘"라고 요청하면 `$astra-luna-sol` 하네스가
+작업을 나눠 처리합니다. 프로젝트 전용 팀이 따로 필요할 때만 아래 3절을 씁니다.
+
+## 3. 프로젝트 전용 하네스 만들기
 
 프로젝트 폴더에서 Codex를 열고 요청하세요.
 
@@ -74,7 +89,7 @@ als harness apply    # 표준 위치에 반영 (덮어쓰는 파일은 백업)
 쓰면서 생긴 피드백은 `$harness-evolve 하네스 회고해줘`로 에이전트·스킬에 반영합니다.
 자세한 절차는 설치된 스킬(`~/.codex/skills/harness/`)에 있습니다.
 
-## 3. 일반 사용
+## 4. 일반 사용
 
 ```bash
 cd ~/work/my-app
@@ -105,7 +120,7 @@ als install --hooks-only
 저장소에는 `.codex/hooks.json` 하나만 생기고, 작업 기록은 저장소 밖에 저장됩니다.
 계획을 등록하는 방법은 [하네스 가이드](docs/harness.md)에 있습니다.
 
-## 4. 자주 쓰는 명령
+## 5. 자주 쓰는 명령
 
 | 명령 | 하는 일 |
 |---|---|
@@ -119,9 +134,10 @@ als install --hooks-only
 | `als-flow run`, `status`, `ls` | 워크플로 실행·상태 (`_workspace/.flow/`) |
 | `als-agent start`, `send`, `list`, `show` | 이름 있는 지속형 에이전트와 대화 |
 | `als-task add`, `update`, `list` | 공유 작업 목록 (`_workspace/tasks.json`) |
+| `als harness init` | 범용 하네스를 프로젝트에 적용 (`AGENTS.md` 섹션) |
 | `als harness diff`, `apply` | 만든 하네스를 `.codex/`·`.agents/`에 반영 |
 
-## 5. 업데이트와 제거
+## 6. 업데이트와 제거
 
 ```bash
 cd astra-luna-sol-orchestrator
@@ -135,7 +151,7 @@ als uninstall --global       # 전체 제거
 `als uninstall ~/work/my-app`으로 이전 설치를 지운 뒤, 필요하면 그 저장소에서
 `als install --hooks-only`를 실행하세요.
 
-## 6. 문제가 생기면
+## 7. 문제가 생기면
 
 | 증상 | 해결 |
 |---|---|
