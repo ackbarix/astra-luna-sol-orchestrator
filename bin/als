@@ -11,7 +11,7 @@ Usage: als COMMAND [ARGS]
                                        --skip-hooks --policy-file PATH --force-uninstall
   uninstall [PROJECT|--global] [FLAGS] remove ALS (same as install ... --uninstall)
   doctor [--no-probe] [--json]         check dependencies, then the harness in this project
-  run [CODEX ARGS]                     start Codex (`codex --profile als` when installed globally)
+  run [CODEX ARGS]                     start Codex directly (no proxy; `--profile als` when installed globally)
   plan new FILE                        write a minimal plan JSON template
   usage [ARGS]                         token usage report for this project (token_usage.py);
                                        --latest unless --list/--root/--day/--latest* is given
@@ -233,6 +233,17 @@ case $cmd in
  plan) plan_new "$@" ;;
  run)
   command -v codex >/dev/null 2>&1 || die "codex not found on PATH (npm i -g @openai/codex)"
+  # Talk to the GPT endpoint directly, bypassing any proxy (e.g. OpenCodex) that
+  # config.toml points at. ALS_CODEX_BASE_URL overrides; set it empty to keep config.toml.
+  if [ "${ALS_CODEX_BASE_URL+set}" = set ]; then
+   url=$ALS_CODEX_BASE_URL
+  else
+   case $(codex login status 2>&1) in
+    *"API key"*|*"api key"*) url=https://api.openai.com/v1 ;;
+    *) url=https://chatgpt.com/backend-api/codex ;;
+   esac
+  fi
+  if [ -n "$url" ]; then set -- -c "openai_base_url=\"$url\"" "$@"; fi
   if [ -f "$codex_home/als.config.toml" ]; then exec codex --profile als "$@"; fi
   exec codex "$@" ;;
  usage)
