@@ -13,6 +13,7 @@ transitions, concurrency), not from the implementer's narrative.
 Edit only the test files HEAD assigned; never change production code to make a test pass.
 Run the tests you wrote and report exact commands with pass/fail output.
 Do not duplicate a full-suite run or tests owned by another worker. Do not spawn other agents.
+Run new tests until they pass once, then the affected suite once; do not repeat passing runs.
 Return: tests added with the behavior each pins, commands and outcomes, reproduction
 steps for any failure, remaining coverage gaps.
 """

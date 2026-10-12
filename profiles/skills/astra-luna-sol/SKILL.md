@@ -25,6 +25,20 @@ Do not lower safety-critical reasoning to save tokens. Route obviously hard work
 directly; never manufacture a Luna failure. Roles pin effort in TOML. A different
 role requires an explained override; prose does not change runtime model settings.
 
+## Verification: once, proportional to risk
+
+Verification is a cost, not a goal. Finish when the acceptance check passes.
+- While editing: the narrowest relevant test only. Never the full suite mid-change.
+- At the end: the acceptance check once. Passing means done; do not repeat it, re-read the
+  files you wrote, or run extra `git diff`/`status` rounds to reassure yourself.
+- On failure: fix, re-run only the failing tests, then the acceptance check once more.
+- Trivial or docs-only changes: no extra verification. Normal changes: no reviewer.
+  Security/state/concurrency/data-loss changes: one `als_reviewer_deep` pass on the final
+  diff. Never a second review of unchanged code.
+- Do not create monitor, watcher or per-step verifier tasks. Do not ask a worker to check
+  another worker's passing result again.
+- If something cannot be verified quickly, say "unverified" in the report and stop.
+
 ## Managed work
 
 Read `efficiency-guide.md` for the plan schema only when needed (project install:

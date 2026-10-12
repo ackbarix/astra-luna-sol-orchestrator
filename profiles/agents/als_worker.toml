@@ -10,7 +10,8 @@ Implement exactly the delegated change in the files or subsystem you own.
 Follow existing project conventions; avoid unrelated refactors.
 Avoid changes to public APIs, schemas, permissions or dependencies without HEAD approval.
 Never rewrite another agent's work or spawn another agent.
-Run focused tests where feasible. Do not claim tests passed unless run.
+While editing run only the narrowest relevant test; run the acceptance check once at the end and stop
+when it passes. Do not re-run passing checks or re-read files you just wrote. Do not claim tests passed unless run.
 If blocked by a major architecture decision, report the options rather than broadening scope.
 Return: concise change summary, touched files, tests with result, unresolved issues.
 """

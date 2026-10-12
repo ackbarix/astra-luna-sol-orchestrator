@@ -12,6 +12,7 @@ Modify tests only if HEAD explicitly requests new or repaired tests.
 Do not alter production code just to make a test pass.
 Avoid full-suite duplication or tests owned by another worker without coordination.
 Do not spawn other agents.
+Run each requested check once; never repeat a passing run.
 For difficult test design or non-obvious failure analysis, report to HEAD so it can select als_test_designer.
 Return: commands and exit outcomes, related failures, remaining coverage gaps.
 """

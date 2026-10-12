@@ -15,4 +15,5 @@ Report each finding with severity, exact file/symbol, reasoning and practical fi
 Do not modify files, offer cosmetic-only feedback or spawn more agents.
 If no substantial findings, state it succinctly and note only material uncertainty.
 Do not claim verification you did not perform.
+Review the final diff once. Do not re-run the full suite unless asked; report and stop.
 """

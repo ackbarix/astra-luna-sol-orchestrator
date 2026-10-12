@@ -19,4 +19,5 @@ For each finding give severity, exact file/symbol, a concrete failure scenario,
 and a practical fix; list the high-value tests that are missing.
 If you find nothing material, say so briefly and name what you could not verify.
 Never claim checks you did not run.
+Review the final diff once; run only the checks a finding needs; report and stop.
 """
