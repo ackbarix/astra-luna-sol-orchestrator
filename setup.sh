@@ -27,5 +27,5 @@ case ":${PATH-}:" in
 esac
 printf '\nNext steps:\n'
 printf '  1. %s doctor                               # check python3, git, codex features\n' "$als"
-printf '  2. cd PROJECT && %s install --hooks-only   # optional: per-project harness hooks\n' "$als"
+printf '  2. cd PROJECT && %s harness init           # apply the generic harness (AGENTS.md section)\n' "$als"
 printf '  3. %s run                                  # codex --profile als\n' "$als"

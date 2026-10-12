@@ -41,32 +41,6 @@ class InstalledHookTests(base.Sandbox, unittest.TestCase):
         (fake / 'ocx').chmod(0o755)
         self.env['PATH'] = str(fake) + os.pathsep + self.env.get('PATH', '')
 
-    def hook_command(self, project):
-        hooks = json.loads((project / '.codex/hooks.json').read_text())
-        return hooks['hooks']['Stop'][0]['hooks'][0]['command']
-
-    def run_doctor(self, command, cwd):
-        doctor = command[:-len(' hook')] + ' doctor'
-        return subprocess.run(['sh', '-c', doctor], cwd=cwd, capture_output=True, text=True, env=self.env)
-
-    def test_hook_command_runs_from_subdirectory_and_worktree(self):
-        self.ok(self.proj())
-        command = self.hook_command(self.p)
-        sub = self.p / 'a/b'
-        sub.mkdir(parents=True)
-        result = self.run_doctor(command, sub)
-        # Exit 1 only reports missing required dependencies in the sandbox (r3 doctor exit codes).
-        self.assertIn(result.returncode, (0, 1), result.stderr)
-        self.assertTrue(json.loads(result.stdout)['hooks_configured'])
-        git = ['git', '-C', str(self.p), '-c', 'user.email=t@t', '-c', 'user.name=t']
-        subprocess.run(git + ['add', '-A'], check=True, capture_output=True)
-        subprocess.run(git + ['commit', '-qm', 'x'], check=True, capture_output=True)
-        worktree = self.base / 'fork'
-        subprocess.run(git + ['worktree', 'add', '-q', str(worktree)], check=True, capture_output=True)
-        result = self.run_doctor(command, worktree)
-        self.assertIn(result.returncode, (0, 1), result.stderr)
-        self.assertTrue(json.loads(result.stdout)['hooks_configured'])
-
     def test_project_move_keeps_hooks_valid(self):
         self.ok(self.proj())
         moved = self.base / 'moved'
@@ -83,21 +57,6 @@ class InstalledHookTests(base.Sandbox, unittest.TestCase):
         self.ok(self.proj('--check'))
         self.ok(self.proj('--uninstall'))
         self.assertEqual((self.p / '.codex/hooks.json').read_bytes(), original)
-
-    def test_unmanaged_hook_edit_spliced_on_uninstall(self):
-        (self.p / '.codex').mkdir()
-        (self.p / '.codex/hooks.json').write_bytes(b'{"hooks":{}}')
-        self.ok(self.proj())
-        path = self.p / '.codex/hooks.json'
-        data = json.loads(path.read_text())
-        data['hooks']['Stop'].append({'hooks': [{'type': 'command', 'command': 'echo user'}]})
-        path.write_text(json.dumps(data))
-        check = self.proj('--check')
-        self.assertEqual(check.returncode, 2)
-        self.assertIn('UNMANAGED HOOKS CHANGED', check.stdout)
-        self.ok(self.proj('--uninstall'))
-        self.assertEqual(json.loads(path.read_text()),
-                         {'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'echo user'}]}]}})
 
     def legacy_groups(self, project):
         command = ('python3 ' + shlex.quote(str(project / '.astra-luna-sol/harness.py'))
@@ -140,9 +99,9 @@ class InstalledHookTests(base.Sandbox, unittest.TestCase):
 
     def test_moved_legacy_project_reported(self):
         self.make_legacy(self.base / 'old-location')
-        check = self.proj('--check')
-        self.assertEqual(check.returncode, 2)
-        self.assertIn('PROJECT MOVED', check.stdout)
+        check = self.proj('--check')  # 1.2: any ALS hook groups mean "reinstall to remove them"
+        self.assertEqual(check.returncode, 4)
+        self.assertIn('ALS OUTDATED', check.stdout)
         self.assertIn('install.sh', check.stdout)
         self.ok(self.proj())
         self.ok(self.proj('--check'))
@@ -177,7 +136,7 @@ class InstalledHookTests(base.Sandbox, unittest.TestCase):
 class RecoveryTests(base.Sandbox, unittest.TestCase):
     def test_uninstall_proceeds_when_managed_files_missing(self):
         self.ok(self.proj())
-        for rel in ('.codex/agents/als_worker.toml', '.astra-luna-sol/harness.py', '.codex/hooks.json',
+        for rel in ('.codex/agents/als_worker.toml', '.astra-luna-sol/token_usage.py',
                     '.codex/config.toml', 'AGENTS.md'):
             (self.p / rel).unlink()
         self.assertEqual(self.proj('--check').returncode, 2)
@@ -274,7 +233,7 @@ class SmallFixTests(base.Sandbox, unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         helptext = self.sh('--help').stdout + self.py('--help').stdout
         for flag in ('--global', '--hooks-only', '--dry-run', '--check', '--uninstall', '--force-uninstall',
-                     '--adopt', '--skip-hooks', '--policy-file'):
+                     '--adopt', '--policy-file'):
             self.assertIn(flag, result.stderr)
             self.assertIn(flag, helptext)
         self.assertIn('4', self.py('--help').stdout)
@@ -329,7 +288,7 @@ class SmallFixTests(base.Sandbox, unittest.TestCase):
         self.assertEqual(result.returncode, 4)
         self.assertIn('ALS OUTDATED', result.stdout)
         self.ok(self.proj())
-        harness = self.p / '.astra-luna-sol/harness.py'
+        harness = self.p / '.astra-luna-sol/token_usage.py'
         harness.chmod(0o600)
         result = self.proj('--check')
         self.assertEqual(result.returncode, 2)
@@ -365,24 +324,6 @@ class SmallFixTests(base.Sandbox, unittest.TestCase):
         outside = self.proj('--policy-file', '../x.md')
         self.assertEqual(outside.returncode, 2)
 
-    def test_hook_interpreter_falls_back_to_installer_python(self):
-        fake = self.base / 'bin'
-        fake.mkdir()
-        (fake / 'python3').write_text('#!/bin/sh\nexit 1\n')
-        (fake / 'python3').chmod(0o755)
-        git = subprocess.run(['sh', '-c', 'command -v git'], capture_output=True, text=True).stdout.strip()
-        os.symlink(git, fake / 'git')
-        env = dict(self.env, PATH=str(fake))
-        result = subprocess.run([sys.executable, str(ROOT / 'install.py'), '--target', str(self.p)],
-                                capture_output=True, text=True, env=env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('NOTICE', result.stderr)
-        command = json.loads((self.p / '.codex/hooks.json').read_text())['hooks']['Stop'][0]['hooks'][0]['command']
-        self.assertTrue(command.endswith('exec ' + shlex.quote(os.path.abspath(sys.executable)) + ' "$s" hook'))
-        self.assertEqual(self.manifest()['interpreter'], os.path.abspath(sys.executable))
-        check = subprocess.run([sys.executable, str(ROOT / 'install.py'), '--target', str(self.p), '--check'],
-                               capture_output=True, text=True, env=env)
-        self.assertEqual(check.returncode, 0, check.stdout)
 
 
 class NoTomlTests(base.Sandbox, unittest.TestCase):

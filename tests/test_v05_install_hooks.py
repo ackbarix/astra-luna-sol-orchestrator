@@ -6,7 +6,7 @@ import subprocess
 import unittest
 
 from als_harness import integration
-from als_harness.common import HarnessError
+from als_harness.integration import HarnessError
 
 
 class HookGroupTests(unittest.TestCase):

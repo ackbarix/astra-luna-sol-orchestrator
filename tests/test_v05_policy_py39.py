@@ -23,7 +23,8 @@ except ModuleNotFoundError:  # Python 3.9/3.10
     tomllib = None
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ['als_harness/efficiency.py', 'als_harness/telemetry.py', 'scripts/token_usage.py', 'scripts/check-runtime.py']
+FILES = ['als_harness/deps.py', 'als_harness/integration.py', 'install.py', 'config_overlay.py', 'als_flow/common.py', 'als_flow/flow.py', 'als_flow/cli.py', 'als_flow/agent.py', 'als_flow/task.py', 'als_flow/apply.py', 'scripts/token_usage.py', 'scripts/check-runtime.py']
+GUARDED_TOMLLIB = {'scripts/check-runtime.py', 'config_overlay.py', 'als_flow/common.py', 'als_flow/apply.py'}
 
 
 def load(name, rel):
@@ -64,7 +65,7 @@ class SyntaxFloorTests(unittest.TestCase):
                     if isinstance(node, ast.Import):
                         for alias in node.names:
                             if alias.name == 'tomllib':
-                                self.assertEqual(rel, 'scripts/check-runtime.py')
+                                self.assertIn(rel, GUARDED_TOMLLIB)
 
     def test_tomllib_import_is_guarded(self):
         tree = ast.parse((ROOT / 'scripts/check-runtime.py').read_text(encoding='utf-8'))

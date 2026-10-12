@@ -31,7 +31,6 @@ RUNTIME_FLOOR = (3, 9)
 INSTALLER_TOML = (3, 11)
 GIT_WORKTREE = (2, 5)
 CODEX_FEATURES = {
-    'hooks': 'enable with `codex features enable hooks` (or [features] hooks = true in config.toml)',
     'multi_agent': 'enable with `codex features enable multi_agent` (or [features] multi_agent = true)',
 }
 
@@ -93,7 +92,7 @@ def bin_dir():
 def python_items():
     found = '.'.join(map(str, sys.version_info[:3])) + ' (' + sys.executable + ')'
     runtime = _item('python', found, sys.version_info[:2] >= RUNTIME_FLOOR,
-                    'ALS needs Python 3.9+ as `python3` on PATH (hooks run python3)')
+                    'ALS needs Python 3.9+ as `python3` on PATH (als-flow, als-agent and als-task run python3)')
     toml = sys.version_info[:2] >= INSTALLER_TOML
     if not toml:
         try:
@@ -111,28 +110,20 @@ def python_items():
         version = _version(out) if code == 0 else None
         found = (out.strip() if version else 'unusable') + ' (' + path_python + ')'
         return [runtime, installer, _item('python3-on-path', found, version and version[:2] >= RUNTIME_FLOOR,
-                                          'hooks run `python3` from PATH; put Python 3.9+ first on PATH '
-                                          'or reinstall so the hook records an absolute interpreter')]
+                                          'als-flow/als-agent/als-task run `python3` from PATH; put Python 3.9+ '
+                                          'first on PATH or reinstall with ALS_PYTHON=/path/to/python3')]
     return [runtime, installer]
 
 
 def git_item():
     exe = shutil.which('git')
     if not exe:
-        return _item('git', None, False, 'install git; project hooks locate the repository with git')
+        return _item('git', None, False, 'install git; als locates the project root with git')
     code, out = _run([exe, '--version'])
     version = _version(out) if code == 0 else None
     found = (out.strip() if version else 'unusable') + ' (' + exe + ')'
     return _item('git', found, version and version[:2] >= GIT_WORKTREE,
                  'git 2.5+ is needed for `git worktree` support used by forked workers')
-
-
-def sqlite_item():
-    try:
-        import sqlite3
-    except ImportError:
-        return _item('sqlite3', None, False, 'this Python lacks the sqlite3 module; install a full Python build')
-    return _item('sqlite3', sqlite3.sqlite_version, True)
 
 
 def codex_items(probe=True):
@@ -225,7 +216,7 @@ def check(project: Path | None = None, probe: bool = True, timeout: float | None
     global _timeout
     previous, _timeout = _timeout, (timeout if timeout and timeout > 0 else None)
     try:
-        items = python_items() + [git_item(), sqlite_item()] + codex_items(probe) + [ocx_item(), bin_item()]
+        items = python_items() + [git_item()] + codex_items(probe) + [ocx_item(), bin_item()]
         items += conflict_items(project)
     finally:
         _timeout = previous

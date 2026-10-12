@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.0 — Managed-run harness removed
+
+ALS now follows Harness v2 only: the generic team (`$astra-luna-sol`), project teams (`$harness`),
+`als-flow`/`als-agent`/`als-task` and `als harness init|diff|apply`. The managed-run layer, which
+Harness v2 does not have and which Astra sometimes tried to use unasked, is gone:
+
+- Removed: Codex hooks, run registration, file/resource claims, evidence-based completion,
+  efficiency policy and telemetry (`als_harness` engine/state/hooks/verify/... and
+  `scripts/harness.py`), the `als status|start|prepare|verify|complete|...` and `als plan new`
+  commands, `docs/harness.md` and `docs/efficiency.md`. Old commands now print what replaced them.
+- Kept: `als doctor` (dependency and install-conflict checks; no longer requires the Codex `hooks`
+  feature or sqlite3), `als usage`, installers, roles, skills and profile.
+- Upgrades: reinstalling (`sh setup.sh`, `als install PROJECT`) removes the old harness files and the
+  ALS hook groups, leaving user hooks byte-exact and runtime state/evidence untouched; files you
+  edited refuse as drift. `--hooks-only` now only checks/removes pre-1.2 hooks, and `als doctor`
+  points at leftovers. Previously a global reinstall would have refused retired paths as unknown.
+- Tests: managed-run suites removed; a 1.1.0 → 1.2 upgrade suite (global, project, --hooks-only,
+  edited retired file) added.
+
 ## 1.1.0 — Generic harness
 
 - `$astra-luna-sol` rewritten as a ready-to-use Harness v2 orchestrator (mixed mode, agent table,

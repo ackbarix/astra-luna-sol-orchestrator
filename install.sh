@@ -5,18 +5,16 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 usage() {
  cat <<'USAGE'
 Usage:
-  sh install.sh PROJECT [--dry-run] [--skip-hooks] [--adopt] [--policy-file PATH]
-                        [--check | --uninstall | --force-uninstall]
-  sh install.sh PROJECT --hooks-only [--dry-run] [--adopt]
+  sh install.sh PROJECT [--dry-run] [--adopt] [--policy-file PATH]
                         [--check | --uninstall | --force-uninstall]
   sh install.sh --global [--dry-run] [--adopt] [--check | --uninstall | --force-uninstall]
+  sh install.sh PROJECT --hooks-only (--check | --uninstall | --force-uninstall)
 
   PROJECT            existing project directory (project-local install, default)
-  --global           harness in ${ALS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/als},
-                     roles/skill/profile in ${CODEX_HOME:-$HOME/.codex}; use `codex --profile als`
-  --hooks-only       per-project .codex/hooks.json calling the global harness
+  --global           tools in ${ALS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/als},
+                     roles/skills/profile in ${CODEX_HOME:-$HOME/.codex}; use `codex --profile als`
+  --hooks-only       check or remove the per-project hooks of releases before 1.2
   --dry-run          print the plan, write nothing
-  --skip-hooks       project mode: no hooks (removes prior ALS hook groups only)
   --adopt            own existing files byte-identical to this release (lost manifest)
   --policy-file PATH project mode: in-repo file for the policy block (default AGENTS.md)
   --check            exit 0 ok, 1 not installed, 2 drift/refused, 4 outdated

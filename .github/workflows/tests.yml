@@ -26,7 +26,7 @@ jobs:
           HOME="$sandbox/home" CODEX_HOME="$sandbox/home/.codex" \
           XDG_DATA_HOME="$sandbox/home/.local/share" XDG_STATE_HOME="$sandbox/home/.local/state" \
             python3 -m unittest discover -s tests -v
-      - run: python3 -m py_compile install.py config_overlay.py scripts/token_usage.py scripts/check-runtime.py scripts/harness.py als_harness/*.py
+      - run: python3 -m py_compile install.py config_overlay.py scripts/token_usage.py scripts/check-runtime.py als_harness/*.py als_flow/*.py
       - name: POSIX sh scripts parse with sh (and dash where available)
         run: |
           for script in install.sh setup.sh bin/als; do
@@ -72,13 +72,13 @@ jobs:
           project="$sandbox/project"
           mkdir "$project" && git init -q "$project"
           cd "$project"
-          "$ALS_BIN_DIR/als" install --hooks-only
+          "$ALS_BIN_DIR/als" harness init
+          grep -q '\$astra-luna-sol' AGENTS.md
           # Exit status reflects required checks; the JSON must parse either way.
           rc=0; "$ALS_BIN_DIR/als" doctor --no-probe --json > "$sandbox/doctor.json" || rc=$?
           echo "als doctor exit status: $rc"
-          python -c 'import json, sys; d = json.load(open(sys.argv[1])); assert set(d) == {"deps", "harness"}, d' \
+          python -c 'import json, sys; d = json.load(open(sys.argv[1])); assert set(d) == {"deps"}, d' \
             "$sandbox/doctor.json"
-          "$ALS_BIN_DIR/als" uninstall --hooks-only
           "$ALS_BIN_DIR/als" uninstall --global
 
   end-to-end:
@@ -119,15 +119,10 @@ jobs:
           sh install.sh "$project" --check
           sh install.sh "$project" --uninstall
           test -z "$(ls -A "$project" | grep -v '^.git$')"
-      - name: Global install, hooks-only, check, uninstall
+      - name: Global install, check, uninstall
         run: |
-          project="$SANDBOX/project2"
-          mkdir "$project" && git init -q "$project"
           sh install.sh --global
           sh install.sh --global --check
-          sh install.sh "$project" --hooks-only
-          sh install.sh "$project" --hooks-only --check
-          sh install.sh "$project" --hooks-only --uninstall
           sh install.sh --global --uninstall
           test ! -e "$CODEX_HOME/als.config.toml"
       - name: setup.sh bootstrap, then als doctor with a fake codex
@@ -138,8 +133,8 @@ jobs:
           mkdir "$project" && git init -q "$project"
           cd "$project"
           als doctor
-          als install --hooks-only
-          als status
+          als harness init
+          als harness init | grep -q 'ALREADY APPLIED'
+          als-flow ls
           als version
-          als uninstall --hooks-only
           als uninstall --global

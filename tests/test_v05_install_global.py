@@ -1,4 +1,4 @@
-"""0.5 global mode, per-project --hooks-only, the `als` entry point and setup.sh.
+"""Global mode, the `als` entry point and setup.sh (pre-1.2 hook cleanup: test_v12_remove_managed).
 
 All runs use temporary HOME/CODEX_HOME/XDG dirs and a fake `codex` on PATH.
 """
@@ -16,7 +16,7 @@ ROOT = base.ROOT
 FAKE_CODEX = '''#!/bin/sh
 case "$1" in
  --version) echo "codex-cli 9.9.9" ;;
- features) printf 'hooks    stable  %s\\nmulti_agent    stable  true\\n' "${FAKE_HOOKS:-true}" ;;
+ features) printf 'multi_agent    stable  %s\\n' "${FAKE_MULTI:-true}" ;;
  login) echo "${FAKE_LOGIN:-Logged in using ChatGPT}" ;;
  *) echo "FAKE CODEX $*" ;;
 esac
@@ -48,11 +48,12 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
         self.assertFalse(self.als_home.exists())
         result = self.ok(self.glob())
         self.assertIn('not on PATH', result.stdout)
-        for rel in ('harness.py', 'als_harness/deps.py', 'token_usage.py', 'usage.sh', 'run.sh',
+        for rel in ('als_harness/deps.py', 'als_flow/flow.py', 'token_usage.py', 'usage.sh', 'run.sh',
                     'check-runtime.py', 'smoke-test.txt', 'VERSION', 'licenses/Apache-2.0.txt',
-                    'harness-guide.md', 'efficiency-guide.md', 'manifest.json', 'release/install.py',
-                    'release/bin/als', 'release/profiles/config.toml'):
+                    'manifest.json', 'release/install.py', 'release/bin/als', 'release/profiles/config.toml'):
             self.assertTrue((self.als_home / rel).is_file(), rel)
+        for rel in ('harness.py', 'harness-guide.md', 'efficiency-guide.md', 'als_harness/engine.py'):
+            self.assertFalse((self.als_home / rel).exists(), rel)
         for rel in ('agents/als_worker.toml', 'agents/als_reviewer_deep.toml', 'skills/astra-luna-sol/SKILL.md'):
             self.assertTrue((self.codex_home / rel).is_file(), rel)
         self.assertEqual((self.codex_home / 'als.config.toml').read_bytes(),
@@ -105,100 +106,43 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('CODEX_HOME=' + str(self.codex_home), result.stderr)
 
-    def test_hooks_only_lifecycle(self):
-        refused = self.proj('--hooks-only')
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn('--global', refused.stderr)
-        self.ok(self.glob())
-        self.ok(self.proj('--hooks-only'))
-        hooks = json.loads((self.p / '.codex/hooks.json').read_text())
-        command = hooks['hooks']['Stop'][0]['hooks'][0]['command']
-        self.assertEqual(command, 'python3 "${HOME:-' + str(self.home) + '}/.local/share/als/harness.py" hook')
-        self.assertEqual(hooks['hooks']['PreToolUse'][0]['matcher'], 'spawn_agent')
-        self.assertEqual(sorted(p.name for p in self.p.iterdir()), ['.codex', '.git'])
-        self.ok(self.proj('--hooks-only', '--check'))
-        self.ok(self.glob('--check'))
-        blocked = self.glob('--uninstall')
-        self.assertEqual(blocked.returncode, 2)
-        self.assertIn('als uninstall --hooks-only', blocked.stderr)
-        self.ok(self.proj('--hooks-only', '--uninstall'))
-        self.assertEqual(sorted(p.name for p in self.p.iterdir()), ['.git'])
-        self.ok(self.glob('--uninstall'))
-
-    def test_hooks_only_preserves_user_hooks_bytes(self):
-        self.ok(self.glob())
-        (self.p / '.codex').mkdir()
-        original = b'{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo hi"}]}]}}'
-        (self.p / '.codex/hooks.json').write_bytes(original)
-        self.ok(self.proj('--hooks-only'))
-        self.ok(self.proj('--hooks-only'))
-        self.ok(self.proj('--hooks-only', '--uninstall'))
-        self.assertEqual((self.p / '.codex/hooks.json').read_bytes(), original)
-
-    @unittest.skipIf(__import__('config_overlay').tomllib is None, 'project mode needs tomllib or tomli')
-    def test_hooks_only_refused_over_project_install(self):
-        self.ok(self.glob())
-        self.ok(self.proj())
-        result = self.proj('--hooks-only')
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('project-mode', result.stderr)
-
-    def test_moved_hooks_project_detected_and_forgotten(self):
-        self.ok(self.glob())
-        self.ok(self.proj('--hooks-only'))
-        old = self.p
-        moved = self.base / 'moved'
-        old.rename(moved)
-        self.p = moved
-        check = self.glob('--check')
-        self.assertEqual(check.returncode, 2)
-        self.assertIn('PROJECT MOVED', check.stdout)
-        here = self.proj('--hooks-only', '--check')
-        self.assertEqual(here.returncode, 2)
-        self.assertIn('PROJECT MOVED', here.stdout)
-        forget = self.py('--target', str(old), '--hooks-only', '--uninstall')
-        self.assertEqual(forget.returncode, 0, forget.stderr)
-        self.assertIn('FORGET', forget.stdout)
-        self.ok(self.glob('--check'))
-
     # ------------------------------------------------------------ bin/als
     def test_als_entrypoint(self):
         self.ok(self.glob())
         helptext = self.als('help').stdout
-        for word in ('install', 'uninstall', 'doctor', 'run', 'plan new FILE', 'usage', 'status', 'version'):
+        for word in ('install', 'uninstall', 'doctor', 'run', 'harness init', 'usage', 'version'):
             self.assertIn(word, helptext)
+        for word in ('plan new', 'status|start'):
+            self.assertNotIn(word, helptext)
         self.assertEqual(self.als('version').stdout.strip(), (ROOT / 'VERSION').read_text().strip())
         doctor = self.als('doctor')
         self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
-        self.assertIn('codex-feature:hooks: enabled', doctor.stdout)
-        self.assertIn('Harness', doctor.stdout)
-        self.env['FAKE_HOOKS'] = 'false'
+        self.assertIn('codex-feature:multi_agent: enabled', doctor.stdout)
+        self.assertNotIn('hooks', doctor.stdout)
+        self.env['FAKE_MULTI'] = 'false'
         doctor = self.als('doctor')
         self.assertNotEqual(doctor.returncode, 0)
-        self.assertIn('codex features enable hooks', doctor.stdout)
-        self.env.pop('FAKE_HOOKS')
+        self.assertIn('codex features enable multi_agent', doctor.stdout)
+        self.env.pop('FAKE_MULTI')
         run = self.als('run', '--foo')
         self.assertEqual(run.stdout.strip(), 'FAKE CODEX --profile als -c openai_base_url="https://chatgpt.com/backend-api/codex" --foo')
-        self.ok(self.als('install', '--hooks-only'))
-        self.assertTrue((self.p / '.codex/hooks.json').is_file())
         sub = self.p / 'sub'
         sub.mkdir()
-        status = self.als('status', cwd=sub)
-        self.assertEqual(status.returncode, 0, status.stderr)
-        self.assertIn('runs', json.loads(status.stdout))
-        plan = self.als('plan', 'new', 'plan.json')
-        self.assertEqual(plan.returncode, 0, plan.stderr)
-        self.assertEqual(self.als('plan', 'new', 'plan.json').returncode, 2)
-        prepared = self.als('prepare', '--plan', str(self.p / 'plan.json'))
-        self.assertEqual(prepared.returncode, 0, prepared.stderr)
-        self.ok(self.als('uninstall', '--hooks-only'))
+        for old in ('status', 'start', 'plan', 'verify', 'hook'):
+            gone = self.als(old, cwd=sub)
+            self.assertEqual(gone.returncode, 2)
+            self.assertIn('removed in 1.2', gone.stderr)
+        self.assertEqual(self.als('no-such-command').returncode, 2)
+        init = self.als('harness', 'init', cwd=sub)
+        self.assertEqual(init.returncode, 0, init.stderr)
+        self.assertIn('$astra-luna-sol', (self.p / 'AGENTS.md').read_text())
         self.ok(self.als('uninstall', '--global'))
         self.assertFalse(self.als_home.exists())
 
     def test_global_install_points_at_entrypoint_not_clone(self):
         result = self.glob()
         self.ok(result)
-        self.assertIn('als install --hooks-only', result.stdout)
+        self.assertIn('als harness init', result.stdout)
         self.assertNotIn(str(ROOT / 'install.sh'), result.stdout)
 
     def test_doctor_is_human_text_by_default_and_json_on_request(self):
@@ -286,7 +230,7 @@ class GlobalTests(base.Sandbox, unittest.TestCase):
     def test_setup_bootstrap(self):
         result = subprocess.run(['sh', str(ROOT / 'setup.sh')], capture_output=True, text=True, env=self.env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for line in ('doctor', 'install --hooks-only', ' run'):
+        for line in ('doctor', 'harness init', ' run'):
             self.assertIn(line, result.stdout)
         self.assertIn('export PATH="' + str(self.bin) + ':$PATH"', result.stdout)
         self.assertEqual(sorted(p.name for p in self.home.iterdir()), ['.codex', '.local'])

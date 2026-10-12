@@ -51,14 +51,15 @@ class DepsTests(unittest.TestCase):
 
     def test_codex_features_probe(self):
         self.tool('codex', 'case "$1" in --version) echo codex-cli 1.2.3;; '
-                           'features) printf "hooks  stable  false\\nmulti_agent  stable  true\\n";; esac\n')
+                           'features) printf "multi_agent  stable  false\\n";; esac\n')
         items = self.items(deps.check(None, probe=True))
         self.assertEqual(items['codex']['found'], 'codex-cli 1.2.3')
-        self.assertFalse(items['codex-feature:hooks']['ok'])
-        self.assertIn('codex features enable hooks', items['codex-feature:hooks']['hint'])
-        self.assertTrue(items['codex-feature:multi_agent']['ok'])
+        self.assertFalse(items['codex-feature:multi_agent']['ok'])
+        self.assertIn('codex features enable multi_agent', items['codex-feature:multi_agent']['hint'])
+        self.assertNotIn('codex-feature:hooks', items)
+        self.assertNotIn('sqlite3', items)
         no_probe = self.items(deps.check(None, probe=False))
-        self.assertNotIn('codex-feature:hooks', no_probe)
+        self.assertNotIn('codex-feature:multi_agent', no_probe)
 
     def test_bin_dir_on_path_and_conflicts(self):
         os.environ['PATH'] += os.pathsep + str(self.home / '.local/bin')

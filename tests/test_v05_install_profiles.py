@@ -1,11 +1,21 @@
-"""Role profiles match the harness ROLES table; snippet and scripts stay portable."""
+"""Role profiles match the ROLES table; snippet and scripts stay portable."""
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import unittest
 
-from als_harness.common import ROLES
+# name: (model, effort, writes). Luna is pinned to max.
+ROLES = {
+    'als_explorer': ('gpt-6-luna', 'max', False),
+    'als_researcher': ('gpt-6-luna', 'max', False),
+    'als_tester': ('gpt-6-luna', 'max', True),
+    'als_worker': ('gpt-6-luna', 'max', True),
+    'als_test_designer': ('gpt-6-luna', 'max', True),
+    'als_hard_worker': ('gpt-6.1-sol', 'high', True),
+    'als_reviewer': ('gpt-6.1-sol', 'medium', False),
+    'als_reviewer_deep': ('gpt-6.1-sol', 'high', False),
+}
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENTS = ROOT / 'profiles/agents'

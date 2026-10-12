@@ -7,17 +7,15 @@ usage() {
 Usage: als COMMAND [ARGS]
 
   install [PROJECT|--global] [FLAGS]   install ALS (default PROJECT: current repository)
-                                       flags: --hooks-only --dry-run --check --adopt
-                                       --skip-hooks --policy-file PATH --force-uninstall
-  uninstall [PROJECT|--global] [FLAGS] remove ALS (same as install ... --uninstall)
-  doctor [--no-probe] [--json]         check dependencies, then the harness in this project
+                                       flags: --dry-run --check --adopt --policy-file PATH
+                                       --force-uninstall
+  uninstall [PROJECT|--global] [FLAGS] remove ALS (same as install ... --uninstall);
+                                       `als uninstall --hooks-only` removes pre-1.2 hooks
+  doctor [--no-probe] [--json]         check dependencies and install conflicts
   run [CODEX ARGS]                     start Codex directly (no proxy; `--profile als` when installed globally)
-  plan new FILE                        write a minimal plan JSON template
   harness init|diff|apply              apply the generic harness (AGENTS.md) or install a staged one
   usage [ARGS]                         token usage report for this project (token_usage.py);
                                        --latest unless --list/--root/--day/--latest* is given
-  status|start|prepare|finish|verify|complete|report|resume|... [ARGS]
-                                       harness commands for the current project
   version                              print the ALS version
   help                                 show this help
 
@@ -44,7 +42,7 @@ if [ -n "${ALS_PYTHON-}" ] || [ -n "$ALS_DEFAULT_PYTHON" ]; then
 fi
 
 # Installer/release tree: the clone this script lives in, else the global copy.
-if [ -f "$here/../install.py" ] && [ -f "$here/../als_harness/cli.py" ]; then
+if [ -f "$here/../install.py" ] && [ -f "$here/../als_harness/deps.py" ]; then
  release=$(CDPATH= cd -- "$here/.." && pwd -P)
 else
  release=$als_home/release
@@ -74,20 +72,6 @@ project_root() {
  esac
 }
 
-# Harness for the current project: project-local install first, then global.
-harness() {
- root=$(project_root)
- if [ -f "$root/.astra-luna-sol/harness.py" ]; then
-  printf '%s\n' "$root/.astra-luna-sol/harness.py"
- elif [ -f "$als_home/harness.py" ]; then
-  printf '%s\n' "$als_home/harness.py"
- elif [ -f "$release/scripts/harness.py" ]; then
-  printf '%s\n' "$release/scripts/harness.py"
- else
-  return 1
- fi
-}
-
 flow_pkg() {
  root=$(project_root 2>/dev/null) || root=
  for dir in "$root/.astra-luna-sol" "$als_home" "$release"; do
@@ -115,60 +99,6 @@ installer() {
  exec "$py" "$release/install.py" "$@"
 }
 
-plan_new() {
- [ "${1-}" = new ] || die "usage: als plan new FILE"
- file=${2-}
- [ -n "$file" ] || die "usage: als plan new FILE"
- [ ! -e "$file" ] || die "$file already exists; not overwritten"
- cat > "$file" <<'PLAN'
-{
-  "goal": "Describe the verified outcome you want (replace this text)",
-  "workload": "bounded-fix",
-  "purpose": "production",
-  "tasks": [
-    {
-      "id": "implement",
-      "objective": "One bounded change a single worker can finish",
-      "kind": "implementation",
-      "complexity": "bounded",
-      "risk": "normal",
-      "context_files": [],
-      "acceptance": ["Observable result that proves the task is done"],
-      "write_paths": [],
-      "resources": [],
-      "depends_on": [],
-      "checks": ["unit"]
-    }
-  ],
-  "checks": [
-    {"id": "unit", "argv": ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"], "timeout": 120}
-  ],
-  "criteria": [
-    {"id": "behavior", "description": "The requested behaviour is confirmed by real results"}
-  ],
-  "budget": {"tokens": 0, "seconds": 0}
-}
-PLAN
- printf 'Wrote %s. Edit %s, then run:\n  als prepare --plan %s > prepared.json\n  als start --plan prepared.json\n' \
-  "$file" "$file" "$file"
-}
-
-# A project install older than 0.5 (VERSION < 0.5, or a harness without a
-# VERSION file) whose harness rejects the 0.5 doctor flags; prints its version.
-outdated_project() {
- [ -f "$1/.astra-luna-sol/harness.py" ] || return 1
- if [ -f "$1/.astra-luna-sol/VERSION" ]; then
-  ver=$(sed -n '1{s/[[:space:]]//g;p;}' "$1/.astra-luna-sol/VERSION")
- else
-  ver=
- fi
- case $ver in
-  '') printf 'unknown (pre-0.3)\n' ;;
-  0.[0-4]|0.[0-4].*|0.[0-4][!0-9]*) printf '%s\n' "$ver" ;;
-  *) return 1 ;;
- esac
-}
-
 doctor() {
  need_python
  probe=
@@ -185,44 +115,18 @@ doctor() {
  elif [ -f "$root/.astra-luna-sol/als_harness/deps.py" ]; then pkg=$root/.astra-luna-sol
  else pkg=$release
  fi
- rc=0
- harness_ok=
- outdated=
- nodeps=
- if outdated=$(outdated_project "$root"); then
-  :
- elif h=$(harness) && { [ -d "$root/.git" ] || [ -f "$root/.git" ] || [ -f "$root/.astra-luna-sol/harness.py" ]; }; then
-  harness_ok=1
-  # bin/als prints the dependency report itself; skip the harness copy when supported.
-  if "$py" "$h" --project "$root" doctor --help 2>/dev/null | grep -q -e '--no-deps'; then nodeps=--no-deps; fi
- fi
- stale="project install $outdated is outdated: run \`als install\` (upgrade) or \`als uninstall\`"
  if [ -n "$json" ]; then
-  # One JSON object on stdout: {"deps": ..., "harness": ... or null}.
+  # One JSON object on stdout: {"deps": ...}.
+  rc=0
   deps_out=$(PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe --json) || rc=$?
-  harness_out=
-  if [ -n "$harness_ok" ]; then
-   harness_out=$("$py" "$h" --project "$root" doctor $probe $nodeps) || rc=$?
-  fi
-  "$py" -c 'import json, sys
-def load(text):
-    try:
-        return json.loads(text) if text.strip() else None
-    except ValueError:
-        return {"error": "unparseable output", "output": text[:2000]}
-harness = load(sys.argv[2])
-if sys.argv[3]:
-    harness = {"outdated_project_install": sys.argv[3], "message": sys.argv[4]}
-print(json.dumps({"deps": load(sys.argv[1]), "harness": harness}, indent=2))' \
-   "$deps_out" "$harness_out" "$outdated" "$stale" || rc=2
+  "$py" -c 'import json, sys; print(json.dumps({"deps": json.loads(sys.argv[1])}, indent=2))' "$deps_out" || rc=2
   return "$rc"
  fi
+ rc=0
  PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" "$py" -m als_harness.deps --project "$root" $probe || rc=$?
- if [ -n "$outdated" ]; then
-  printf '\nHarness (%s):\n%s\n' "$root" "$stale"
- elif [ -n "$harness_ok" ]; then
-  printf '\nHarness (%s):\n' "$root"
-  "$py" "$h" --project "$root" doctor --format text $probe $nodeps || rc=$?
+ if [ -f "$root/.codex/hooks.json" ] && grep -q 'harness\.py' "$root/.codex/hooks.json" 2>/dev/null; then
+  printf '\nnote: %s/.codex/hooks.json still has ALS hooks from a release before 1.2 (they do nothing now).\n' "$root"
+  printf '      Remove them with `als install` (project install) or `als uninstall --hooks-only`.\n'
  fi
  return "$rc"
 }
@@ -239,7 +143,6 @@ case $cmd in
  install) installer install "$@" ;;
  uninstall) installer uninstall "$@" ;;
  doctor) doctor "$@" ;;
- plan) plan_new "$@" ;;
  run)
   command -v codex >/dev/null 2>&1 || die "codex not found on PATH (npm i -g @openai/codex)"
   # Talk to the GPT endpoint directly, bypassing any proxy (e.g. OpenCodex) that
@@ -276,10 +179,7 @@ case $cmd in
   need_python
   pkg=$(flow_pkg) || die "als_flow not installed; run: als install --global"
   PYTHONPATH="$pkg${PYTHONPATH:+:$PYTHONPATH}" exec "$py" -m als_flow.apply "$@" ;;
- hook) die "hooks are run by Codex, not by als" ;;
- -*) usage >&2; exit 2 ;;
- *)
-  need_python
-  h=$(harness) || die "ALS harness not installed; run: als install --global (or als install in a project)"
-  exec "$py" "$h" --project "$(project_root)" "$cmd" "$@" ;;
+ status|start|prepare|finish|verify|complete|report|resume|cancel|claim|release|evidence|hook|plan)
+  die "\`als $cmd\` belonged to the managed-run harness removed in 1.2; use the generic harness (\$astra-luna-sol, see \`als help\`)" ;;
+ *) usage >&2; exit 2 ;;
 esac
