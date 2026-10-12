@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0 — Claude Code track without OpenCodex (experimental)
+
+- New `als-gpt` launcher (`claude/als_gpt.py`): Claude Code stays the head and runs ALS GPT roles
+  through `codex exec`, with model, effort and sandbox pinned by the role files. It calls the
+  native Codex endpoint directly (ChatGPT or API-key login), so OpenCodex is not required.
+- Writer roles work in their own git worktree on branch `als/<run>`; read-only roles run in
+  place. Runs record prompt, events, report and usage under `~/.local/state/als/gpt-runs/`.
+- New Claude Code skill `als` (risk-proportional verification, bundled delegation, OMO-style
+  plan and a fixed-field `.als/work.json` ledger) and `claude/install_claude.py`
+  (install, `--check`, `--uninstall`, `--dry-run`; refuses user-owned or edited files).
+- The Codex harness from 0.5 is unchanged and still supported.
+- Verified with fake-codex tests and one real read-only worker run; the write path and a
+  cost/quality comparison with the Codex harness are not yet measured.
+
 ## 0.5.0 — global install, `als` command, recovery and state-engine fixes
 
 ### Install and use

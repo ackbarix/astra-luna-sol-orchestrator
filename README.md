@@ -62,6 +62,16 @@ als install --hooks-only
 저장소에는 `.codex/hooks.json` 하나만 생기고, 작업 기록은 저장소 밖에 저장됩니다.
 계획을 등록하는 방법은 [하네스 가이드](docs/harness.md)에 있습니다.
 
+### (실험적) Claude Code에서 쓰기
+
+Claude Code를 총괄로 두고 GPT 워커만 부리는 방식도 있습니다. OpenCodex가 필요 없습니다.
+
+```bash
+python3 claude/install_claude.py      # als-gpt 명령 + Claude Code용 als 스킬
+```
+
+자세한 내용은 [Claude Code에서 ALS 쓰기](docs/claude.md)를 보세요.
+
 ## 3. 자주 쓰는 명령
 
 | 명령 | 하는 일 |
