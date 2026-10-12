@@ -35,9 +35,9 @@ class HarnessError(ValueError):
 
 
 ROLES = {
-    'als_explorer': ('gpt-6-luna', 'medium', False),
-    'als_researcher': ('gpt-6-luna', 'medium', False),
-    'als_tester': ('gpt-6-luna', 'medium', True),
+    'als_explorer': ('gpt-6-luna', 'max', False),
+    'als_researcher': ('gpt-6-luna', 'max', False),
+    'als_tester': ('gpt-6-luna', 'max', True),
     'als_worker': ('gpt-6-luna', 'max', True),
     'als_test_designer': ('gpt-6-luna', 'max', True),
     'als_hard_worker': ('gpt-6.1-sol', 'high', True),

@@ -3,7 +3,7 @@ Use a fresh Codex session with an explicitly read-only parent sandbox. Do not
 modify application code, change settings, install tools, or invoke network tools.
 
 Use the actual available spawn tool, not model impersonation. Spawn exactly:
-1. als_explorer (gpt-6-luna / medium): read .codex/agents/als_explorer.toml and
+1. als_explorer (gpt-6-luna / max): read .codex/agents/als_explorer.toml and
    report the declared name, model and effort in one line.
 2. als_worker (gpt-6-luna / max): read .astra-luna-sol/VERSION and return its text.
    This smoke task is READ-ONLY even though the normal worker can implement code.

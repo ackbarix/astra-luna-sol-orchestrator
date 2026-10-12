@@ -28,7 +28,7 @@ class CalibrationTests(EngineFixture, unittest.TestCase):
         self.e.complete(r)
         self.event(r, root, response='root')
         if accepted_usage:
-            self.event(r, kid, model='gpt-6-luna', response='kid')
+            self.event(r, kid, model='gpt-6-luna', effort='max', response='kid')
         a.review_measurement(self.e, r, 'bounded-fix', quality, True)
         if warnings:
             x = self.s.run(r)

@@ -94,7 +94,7 @@ class InstallTests(unittest.TestCase):
         data['files']['.codex/agents/als_explorer.toml'] = hashlib.sha256(role.read_bytes()).hexdigest()
         mf.write_text(json.dumps(data))
         self.ok(); self.ok('--check')
-        self.assertEqual(tomllib.loads(role.read_text())['model_reasoning_effort'], 'medium')
+        self.assertEqual(tomllib.loads(role.read_text())['model_reasoning_effort'], 'max')
     def test_usage_script_and_license_installed(self):
         self.ok()
         for p in ('token_usage.py','usage.sh','check-runtime.py','smoke-test.txt','licenses/Apache-2.0.txt'):

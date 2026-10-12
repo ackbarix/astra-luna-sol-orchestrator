@@ -1,7 +1,7 @@
 name = "als_researcher"
-description = "GPT-6 Luna Medium focused technical researcher for external API/framework/version compatibility questions when necessary."
+description = "GPT-6 Luna Max focused technical researcher for external API/framework/version compatibility questions when necessary."
 model = "gpt-6-luna"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "max"
 # Read-only is an instruction: child agents inherit the parent's sandbox policy.
 sandbox_mode = "read-only"
 

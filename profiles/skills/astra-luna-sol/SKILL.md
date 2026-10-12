@@ -2,7 +2,7 @@
 name: astra-luna-sol
 description: Cost-aware coding delegation for substantial independent work; skip trivial edits and simple questions.
 ---
-# ALS 0.4 — finish the work, not the orchestration ceremony
+# Astra–Luna–Sol — finish the work, not the orchestration ceremony
 
 HEAD is Astra Medium. Keep architecture, priorities and integration here. Simple
 lookups/one-line edits are direct work: do not create a run or worker just to show
@@ -13,8 +13,8 @@ successful result. Bundle related small tasks. Reuse a relevant worker for follo
 
 | Task | Role | Requested effort |
 |---|---|---|
-| Bounded search / primary-source research | als_explorer / als_researcher | Luna Medium |
-| Existing checks and simple reproductions | als_tester | Luna Medium |
+| Bounded search / primary-source research | als_explorer / als_researcher | Luna Max |
+| Existing checks and simple reproductions | als_tester | Luna Max |
 | Bounded implementation | als_worker | Luna Max |
 | Difficult test design/failure analysis | als_test_designer | Luna Max |
 | Complex implementation/analysis | als_hard_worker | Sol 6.1 High |

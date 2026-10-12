@@ -1,7 +1,7 @@
 name = "als_explorer"
 description = "Read-only repository scout for a bounded search, code path trace or dependency map. Use only when independent exploration materially helps."
 model = "gpt-6-luna"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "max"
 # Read-only is an instruction: child agents inherit the parent's sandbox policy.
 sandbox_mode = "read-only"
 

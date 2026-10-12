@@ -14,7 +14,7 @@ class AttemptOutcomeTests(EngineFixture, unittest.TestCase):
 
     def bound_failure(self, idx, status):
         r = self.sample(idx, failed_first='bound_zero')
-        self.event(r, 'dead' + str(idx), model='gpt-6-luna', response='dead')
+        self.event(r, 'dead' + str(idx), model='gpt-6-luna', effort='max', response='dead')
         task = self.s.task(r, 'scan')
         task['attempts'][0]['status'] = status
         self.s.save_task(task)

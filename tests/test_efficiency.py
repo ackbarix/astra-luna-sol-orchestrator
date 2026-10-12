@@ -151,7 +151,7 @@ class EnginePolicyTests(EngineFixture, unittest.TestCase):
         self.assertIn('set a worker estimate',' '.join(self.e.reserve(r,'scan','c')['reasons']))
     def test_actual_usage_deducted_from_outstanding_estimate(self):
         r=self.start(draft([task(estimate_tokens=100)]));self.e.reserve(r,'scan','c');self.e.bind(r,'c','kid')
-        self.event(r,'kid',n=70,model='gpt-6-luna',effort='medium')
+        self.event(r,'kid',n=70,model='gpt-6-luna',effort='max')
         self.assertEqual(self.e.budget(self.s.run(r))['reserved_estimate'],70)  # 100 - counted(70-50+10)
     def test_terminal_clock_frozen(self):
         r=self.start(draft([]));verify.verify(self.e,r,execute_commands=True);self.e.complete(r)
@@ -180,7 +180,7 @@ class EnginePolicyTests(EngineFixture, unittest.TestCase):
         with self.assertRaises(HarnessError):a.review_measurement(self.e,r,'bounded-fix','fail',False)
         self.assertTrue(a.review_measurement(self.e,r,'bounded-fix','fail',True)['recorded'])
     def test_metrics_exact_subsets(self):
-        r=self.start();self.event(r,n=454001,cached=432768);self.event(r,'kid',n=182619,cached=144896,model='gpt-6-luna')
+        r=self.start();self.event(r,n=454001,cached=432768);self.event(r,'kid',n=182619,cached=144896,model='gpt-6-luna',effort='max')
         m=a.metrics(report.report(self.e,r));self.assertEqual(m['recorded_totals']['total_tokens'],636640)
         self.assertEqual(m['recorded_totals']['uncached_input_tokens'],58956)
         self.assertEqual(m['recorded_totals']['uncached_plus_output_tokens'],58976)
@@ -198,7 +198,7 @@ class HistoryTests(EngineFixture, unittest.TestCase):
         self.e.reserve(r,'scan','c');self.e.bind(r,'c','kid'+str(idx));self.e.worker_stopped('root'+str(idx),'kid'+str(idx),'als_explorer')
         self.e.finish(r,'scan','Actual inspected findings')
         verify.verify(self.e,r,execute_commands=True);self.e.accept(r,'scan');self.e.complete(r)
-        self.event(r,'root'+str(idx),response='root');self.event(r,'kid'+str(idx),model='gpt-6-luna',response='kid')
+        self.event(r,'root'+str(idx),response='root');self.event(r,'kid'+str(idx),model='gpt-6-luna',effort='max',response='kid')
         a.review_measurement(self.e,r,'bounded-fix',quality,True)
         if with_warning:
             x=self.s.run(r);x['warnings']=['missing usage'];self.s.save_run(x)

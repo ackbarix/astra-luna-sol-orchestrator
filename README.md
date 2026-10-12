@@ -109,13 +109,12 @@ als uninstall --global       # 전체 제거
 | 역할 | 모델 / 추론 수준 | 하는 일 |
 |---|---|---|
 | HEAD | GPT-6 Astra / Medium | 총괄 |
-| als_explorer · als_researcher · als_tester | GPT-6 Luna / Medium | 탐색 · 자료 조사 · 테스트 실행 |
-| als_worker · als_test_designer | GPT-6 Luna / Max | 구현 · 테스트 설계 |
+| als_explorer · als_researcher · als_tester · als_worker · als_test_designer | GPT-6 Luna / Max | 탐색 · 자료 조사 · 테스트 실행 · 구현 · 테스트 설계 |
 | als_hard_worker · als_reviewer_deep | GPT-6.1 Sol / High | 고난도 구현 · 고위험 검수 |
 | als_reviewer | GPT-6.1 Sol / Medium | 독립 검수 |
 
-모델과 추론 수준은 역할 파일이 고정합니다. 프롬프트에서 Medium 역할을 Max처럼 쓰라고 하지 말고,
-필요한 수준의 역할을 골라 맡기세요.
+모델과 추론 수준은 역할 파일이 고정합니다. 프롬프트로 역할의 추론 수준을 바꾸지 말고,
+필요한 모델·추론 수준의 역할을 골라 맡기세요.
 
 ## 알아 둘 한계
 

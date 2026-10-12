@@ -56,7 +56,7 @@ class VerifyReportTests(unittest.TestCase):
 
     def test_extra_known_role_with_expected_identity_ok(self):
         data = valid_report()
-        data['threads'].append(thread('als_tester', 'gpt-6-luna', 'medium'))
+        data['threads'].append(thread('als_tester', 'gpt-6-luna', 'max'))
         notes = []
         self.assertEqual(checker.verify_report(data, notes)[1], [])
         self.assertTrue(any('als_tester' in n for n in notes))
