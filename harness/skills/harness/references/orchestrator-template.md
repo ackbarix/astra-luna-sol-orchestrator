@@ -180,7 +180,7 @@ description: "{도메인} 에이전트의 협업을 조율한다. 사용자가 {
    - `als-agent start {teammate-2} --type {type} "..."`
 2. 공유 작업 목록을 등록한다(`_workspace/tasks.json`).
    - `als-task add "{작업1}" --owner {teammate-1}`
-   - `als-task add "{작업3}" --depends-on {작업1의 ID}`
+   - `als-task add "{작업3}" --deps {작업1의 ID}`
    > 팀원 한 명이 맡는 작업은 3~6개가 적절하다. 작업 간 의존 관계를 명시한다.
 
 ### 3단계: 협업 조율

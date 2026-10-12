@@ -99,7 +99,8 @@ def file_mode(path: Path) -> int | None:
 
 
 def release_mode(rel: str) -> int:
-    return 0o755 if rel.endswith((".sh", ".py")) or rel.rsplit("/", 1)[-1] == "als" else 0o644
+    return 0o755 if rel.endswith((".sh", ".py")) or rel.rsplit("/", 1)[-1] in ("als", "als-flow", "als-agent",
+                                                                                "als-task") else 0o644
 
 
 RUNTIME_FLOOR = (3, 9)
@@ -302,6 +303,8 @@ def project_sources() -> dict[str, Path]:
     if len(out) < 6:
         raise ValueError("Incomplete release: agent role files missing")
     out[".agents/skills/astra-luna-sol/SKILL.md"] = ROOT / "profiles/skills/astra-luna-sol/SKILL.md"
+    for rel, source in harness_skill_files().items():
+        out[".agents/skills/" + rel] = source
     for rel, source in runtime_sources().items():
         out[".astra-luna-sol/" + rel] = source
     out[IGNORE] = ROOT / "profiles/runtime.gitignore"
@@ -324,18 +327,44 @@ def runtime_sources() -> dict[str, Path]:
     }
     for module in sorted((ROOT / "als_harness").glob("*.py")):
         out["als_harness/" + module.name] = module
+    for module in sorted((ROOT / "als_flow").glob("*.py")):
+        out["als_flow/" + module.name] = module
     return out
 
 
+def harness_skill_files() -> dict[str, Path]:
+    """Harness v2 skills ported to Codex + GPT (Apache-2.0, see harness/NOTICE.md)."""
+    base = ROOT / "harness/skills"
+    out = {path.relative_to(base).as_posix(): path for path in sorted(base.rglob("*")) if path.is_file()}
+    if "harness/SKILL.md" not in out or "harness-evolve/SKILL.md" not in out:
+        raise ValueError("Incomplete release: harness skills missing")
+    out["harness/NOTICE.md"] = ROOT / "harness/NOTICE.md"
+    return out
+
+
+FLOW_COMMANDS = {"als-flow": "als_flow.cli", "als-agent": "als_flow.agent", "als-task": "als_flow.task"}
+
+
+def flow_wrapper(command: str, als_home: Path) -> bytes:
+    """Installed wrapper for an als_flow command, pinned to this install's ALS_HOME/interpreter."""
+    python = configured_python() or hook_config.DEFAULT_PYTHON
+    return ("#!/bin/sh\n# " + command + " (installed by ALS): runs " + FLOW_COMMANDS[command]
+            + " from ALS_HOME.\nset -eu\nals_home=${ALS_HOME:-" + shlex.quote(str(als_home)) + "}\n"
+            'PYTHONPATH="$als_home${PYTHONPATH:+:$PYTHONPATH}"\nexport PYTHONPATH\n'
+            'exec "${ALS_PYTHON:-' + python + '}" -m ' + FLOW_COMMANDS[command] + ' "$@"\n').encode("utf-8")
+
+
 RELEASE_TOP = ("install.py", "install.sh", "setup.sh", "config_overlay.py", "VERSION", "bin/als",
+               "bin/als-flow", "bin/als-agent", "bin/als-task", "harness/NOTICE.md",
                "docs/harness.md", "docs/efficiency.md", "docs/smoke-test.txt")
 
 
 def release_files() -> dict[str, Path]:
     """Repository-relative files needed to rerun this installer (`als install`)."""
     out = {rel: ROOT / rel for rel in RELEASE_TOP}
-    for pattern in ("als_harness/*.py", "scripts/*", "licenses/*", "profiles/*", "profiles/agents/*.toml",
-                    "profiles/skills/astra-luna-sol/*"):
+    for pattern in ("als_harness/*.py", "als_flow/*.py", "scripts/*", "licenses/*", "profiles/*",
+                    "profiles/agents/*.toml", "profiles/skills/astra-luna-sol/*", "harness/skills/*/*",
+                    "harness/skills/*/references/*"):
         for path in sorted(ROOT.glob(pattern)):
             if path.is_file():
                 out[path.relative_to(ROOT).as_posix()] = path
@@ -352,6 +381,10 @@ def global_sources() -> dict[str, Path]:
     for path in agents:
         out["CODEX_HOME/agents/" + path.name] = path
     out["CODEX_HOME/skills/astra-luna-sol/SKILL.md"] = ROOT / "profiles/skills/astra-luna-sol/SKILL.md"
+    for rel, source in harness_skill_files().items():
+        out["CODEX_HOME/skills/" + rel] = source
+    for command in FLOW_COMMANDS:
+        out["BIN/" + command] = ROOT / "bin" / command  # replaced by flow_wrapper() at install time
     out["CODEX_HOME/" + PROFILE] = ROOT / "profiles/config.toml"
     return out
 
@@ -916,6 +949,7 @@ def project_uninstall(session, state, args, policy, restored, config_state, conf
         return EXIT_OK
     commit(target, plan, {k: session.snapshots[k] for k in plan}, None, layout)
     remove_pycache(target / ".astra-luna-sol/als_harness")
+    remove_pycache(target / ".astra-luna-sol/als_flow")
     recorded = [layout.dir_path(d) for d in state.get("created_dirs", [])] if "created_dirs" in state else \
         [target / d for d in legacy_dirs(state)]
     remove_empty_dirs([d for d in recorded if d is not None])
@@ -997,6 +1031,8 @@ def global_mode(args) -> int:
         raise Refused("Manifest includes unknown managed paths; manual review required")
     desired = {key: path.read_bytes() for key, path in src.items()}
     desired["BIN/als"] = entrypoint(desired["BIN/als"], als_home)
+    for command in FLOW_COMMANDS:
+        desired["BIN/" + command] = flow_wrapper(command, als_home)
     missing, modified = classify(session, state["files"])
     projects = state.get("hooks_projects", {})
     if args.check:
@@ -1048,7 +1084,8 @@ def global_mode(args) -> int:
             print("DRY RUN: nothing written, no Codex/OpenCodex calls")
             return EXIT_OK
         commit(als_home, plan, {k: session.snapshots[k] for k in plan}, None, layout)
-        for directory in ("als_harness", "release", "release/als_harness", "release/scripts"):
+        for directory in ("als_harness", "als_flow", "release", "release/als_harness", "release/als_flow",
+                          "release/scripts"):
             remove_pycache(als_home / directory)
         remove_empty_dirs([d for d in (layout.dir_path(x) for x in state.get("created_dirs", [])) if d])
         print("GLOBAL UNINSTALL OK" + (" (forced; see BACKUP lines above)" if modified else ""))
