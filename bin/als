@@ -13,7 +13,7 @@ Usage: als COMMAND [ARGS]
   doctor [--no-probe] [--json]         check dependencies, then the harness in this project
   run [CODEX ARGS]                     start Codex directly (no proxy; `--profile als` when installed globally)
   plan new FILE                        write a minimal plan JSON template
-  harness diff|apply                   install a harness staged in _workspace/harness-staging
+  harness init|diff|apply              apply the generic harness (AGENTS.md) or install a staged one
   usage [ARGS]                         token usage report for this project (token_usage.py);
                                        --latest unless --list/--root/--day/--latest* is given
   status|start|prepare|finish|verify|complete|report|resume|... [ARGS]

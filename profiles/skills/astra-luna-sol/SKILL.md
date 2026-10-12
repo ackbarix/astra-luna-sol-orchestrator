@@ -1,84 +1,148 @@
 ---
 name: astra-luna-sol
-description: Cost-aware coding delegation for substantial independent work; skip trivial edits and simple questions.
+description: "범용 개발 팀 하네스. 기능 추가, 버그 수정, 리팩터링, 코드 리뷰, 원인 분석, 기술 조사처럼 여러 단계가 필요한 코딩 작업을 ALS 역할 8개(Astra 총괄, Luna 실무, Sol 고난도·검수)로 나눠 처리한다. 결과 수정, 보완, 업데이트, 다시 실행, 일부만 다시, 이전 결과를 바탕으로 한 개선 요청에도 사용한다. 단순 질문, 한 줄 수정, 설명 요청에는 쓰지 않고 직접 답한다. 프로젝트 전용 팀을 새로 설계하는 요청은 harness 스킬을 쓴다."
 ---
-# Astra–Luna–Sol — finish the work, not the orchestration ceremony
 
-HEAD is Astra Medium. Keep architecture, priorities and integration here. Simple
-lookups/one-line edits are direct work: do not create a run or worker just to show
-activity. Do not repeat work already delegated or ask a stronger model to redo a
-successful result. Bundle related small tasks. Reuse a relevant worker for follow-up.
+# Astra–Luna–Sol 범용 하네스
 
-## Routing (task metadata, not model self-identification)
+프로젝트마다 팀을 새로 만들지 않고 바로 쓰는 범용 개발 팀이다. 구성 방식은 Harness v2의
+오케스트레이터 템플릿(혼합 모드)을 따르고, 모델은 GPT를 쓴다. 역할 정의는 전역
+`$CODEX_HOME/agents/als_*.toml`에 있어 프로젝트에 파일을 복사하지 않는다.
 
-| Task | Role | Requested effort |
-|---|---|---|
-| Bounded search / primary-source research | als_explorer / als_researcher | Luna Max |
-| Existing checks and simple reproductions | als_tester | Luna Max |
-| Bounded implementation | als_worker | Luna Max |
-| Difficult test design/failure analysis | als_test_designer | Luna Max |
-| Complex implementation/analysis | als_hard_worker | Sol 6.1 High |
-| Valuable independent review | als_reviewer | Sol 6.1 Medium |
-| High-risk security/state/data review | als_reviewer_deep | Sol 6.1 High |
+## 실행 모드: 혼합
 
-Do not lower safety-critical reasoning to save tokens. Route obviously hard work
-directly; never manufacture a Luna failure. Roles pin effort in TOML. A different
-role requires an explained override; prose does not change runtime model settings.
+작업마다 알맞은 실행 모드를 고른다. 대부분은 서브에이전트 위임으로 충분하다.
 
-## Verification: once, proportional to risk
+| 단계 | 실행 모드 | 선택 이유 |
+|------|----------|-----------|
+| 탐색·조사 | 서브에이전트 위임 | 결과만 받으면 되고, 서로 독립적이라 병렬로 돌릴 수 있다. |
+| 구현·수정 | 서브에이전트 위임 | 맡긴 범위의 변경과 검사 결과만 돌려받으면 된다. |
+| 같은 처리를 목록 전체에 반복(파일 N개, 관점 M개) | 워크플로 조율 (`als-flow`) | 처리 목록과 반복 조건을 코드로 정할 수 있다. 호출 수가 많으므로 사용자 동의를 받는다. |
+| 설계 합의, 같은 전문가와 여러 번 주고받기 | 지속형 에이전트 협업 (`als-agent`, `als-task`) | 이전 대화 맥락을 유지해야 한다. 필요할 때만 쓴다. |
+| 독립 검수 | 서브에이전트 위임 | 고위험 변경에만, 구현이 끝난 최종 diff에 한 번 맡긴다. |
 
-Verification is a cost, not a goal. Finish when the acceptance check passes.
-- While editing: the narrowest relevant test only. Never the full suite mid-change.
-- At the end: the acceptance check once. Passing means done; do not repeat it, re-read the
-  files you wrote, or run extra `git diff`/`status` rounds to reassure yourself.
-- On failure: fix, re-run only the failing tests, then the acceptance check once more.
-- Trivial or docs-only changes: no extra verification. Normal changes: no reviewer.
-  Security/state/concurrency/data-loss changes: one `als_reviewer_deep` pass on the final
-  diff. Never a second review of unchanged code.
-- Do not create monitor, watcher or per-step verifier tasks. Do not ask a worker to check
-  another worker's passing result again.
-- If something cannot be verified quickly, say "unverified" in the report and stop.
+작은 일(한 줄 수정, 단순 조회, 짧은 설명)은 위임하지 않고 메인이 직접 처리한다. 워커 한 번에도
+고정 비용이 들기 때문이다. 관련된 작은 일은 묶어서 한 번에 맡긴다.
 
-## Managed work
+## 에이전트 구성
 
-Read `efficiency-guide.md` for the plan schema only when needed (project install:
-`.astra-luna-sol/`; global install: `${ALS_HOME:-~/.local/share/als}/`).
-CLI (below abbreviated HARNESS): `python3 .astra-luna-sol/harness.py` in a project
-install, or `als <command>` after a global install (`als plan new FILE` drafts a plan).
+| 에이전트 (`agent_type`) | 모델 / 추론 수준 | 권한 | 맡는 일 |
+|------|------|------|------|
+| 메인 (HEAD) | GPT-6 Astra / medium | — | 요구사항, 작업 분해, 통합, 최종 판단 |
+| `als_explorer` | GPT-6 Luna / max | 읽기 전용 | 코드 위치·호출 경로·의존 관계 탐색 |
+| `als_researcher` | GPT-6 Luna / max | 읽기 전용 | 외부 API·버전 같은 1차 자료 조사 |
+| `als_tester` | GPT-6 Luna / max | 쓰기 | 기존 테스트 실행, 재현 |
+| `als_worker` | GPT-6 Luna / max | 쓰기 | 범위가 정해진 구현·수정 |
+| `als_test_designer` | GPT-6 Luna / max | 쓰기 | 어려운 회귀 테스트 설계, 원인 분석 |
+| `als_hard_worker` | GPT-6.1 Sol / high | 쓰기 | 본질적으로 복잡한 구현·디버깅 |
+| `als_reviewer` | GPT-6.1 Sol / medium | 읽기 전용 | 독립 검수 |
+| `als_reviewer_deep` | GPT-6.1 Sol / high | 읽기 전용 | 보안·상태·동시성·데이터 무결성 검수 |
 
-1. Draft goal, checks/criteria and tasks with objective, kind, complexity, risk,
-   acceptance, relevant context_files, write_paths/resources/dependencies. No raw
-   logs or full files in plans. Preserve meaningful constraints. `prepare --plan
-   DRAFT --profile balanced` prints the validated plan; review it, then `start
-   --plan PREPARED --session ACTUAL_ID`. Do not guess IDs or invoke diagnostic
-   models. Use observe unless the user explicitly authorizes guarded.
-2. Trivial/low-risk tasks route to executor=head. For mixed managed work use
-   `begin-head --run ID --task TASK` to reserve writes, do the work, then finish.
-   A wholly trivial request needs no harness run. No fake child IDs for HEAD work.
-3. For a worker, use `task-message --run ID --task TASK`. It starts with
-   `ALS_TASK=TASK` and carries bounded references/conditions. Select the task's
-   exact agent_type. If the active tool supports fork_context, prefer false;
-   otherwise omit it and report inheritance unverified. Full parent context needs
-   full_context_reason. Never invent tool fields or bypass trust/approval rules.
-4. Default balanced admission: up to 3 useful workers, 2 writers (1 for high-risk
-   writes). Six remains the Codex ceiling. Throughput above 3 needs explicit
-   parallel_reason, independent tasks and shared DB/port/fixture ownership.
-   Never start final review before implementation stabilizes or run duplicate builds.
-5. After actual worker termination, `finish` with concise evidence. Use
-   --workers-stopped only when termination was really confirmed. Execute only
-   authorized checks with `verify --execute`; accept tasks and assess criteria on
-   actual evidence. `complete` must not certify missing/failed/stale checks.
-6. Use `status --run ID --compact` during work. Report final facts once. Put long
-   artifacts in evidence and reference them; material failures must not be omitted
-   to meet a length preference. Never generate extra agents just for reporting.
+모델과 추론 수준은 역할 파일이 고정한다. 프롬프트로 수준을 바꾸려 하지 말고 맞는 역할을 고른다.
+어려운 일은 처음부터 Sol에 맡긴다. Luna가 실패하기를 기다리지 않는다. 읽기 전용은 지시일 뿐이다.
+하위 에이전트는 부모 세션의 샌드박스를 물려받으므로, 검수 뒤에는 `git status`로 변경이 없었는지 본다.
 
-## Measurement and limits
+## 작업 절차
 
-Use analyze for recorded cached/uncached input, output, HEAD overhead and retries.
-Raw token totals are NOT fees; cache and reasoning are subsets, not extra tokens.
-After a real terminal production run, measure only after reviewing quality and
-coverage. Caller assessments are not independent grades. History tuning needs
-at least 5 comparable reviewed production runs; smoke tests are excluded.
-`prepare --use-history` may use reviewed estimates for FUTURE plans only. It
-never raises a user budget or edits a live run. Report insufficient evidence.
-No automated price assumptions, hidden supervisor model, benchmark or saving claim.
+### 0단계: 기존 작업 확인
+
+`_workspace/`가 있는지 확인한다.
+
+- 없으면 처음부터 실행한다.
+- 있고 일부만 고쳐 달라는 요청이면 해당 단계나 에이전트만 다시 실행한다.
+- 있고 새 입력이면 기존 디렉터리를 `_workspace_{YYYYMMDD_HHMMSS}/`로 옮긴 뒤 새로 실행한다.
+
+### 1단계: 분석과 작업 계약
+
+1. 요구사항, 영향을 받는 파일, 완료 조건(인수 검사)을 정한다. 모호해서 설계가 달라지면 사용자에게 묻는다.
+   사용자에게 보이는 동작이 바뀌면 완료 조건에 실제 사용 확인 하나를 넣는다(CLI 실행, HTTP 호출 등).
+   테스트 통과는 보조 신호이고, 실제 사용 확인도 마지막에 한 번만 한다.
+2. 작은 일은 여기서 직접 끝낸다.
+3. 큰 작업(여러 모듈, 여러 단계, 되돌리기 어려운 변경)은 먼저 짧은 계획을 쓴다. 목표, 완료 조건, 작업과
+   의존 관계, 위험을 적고 `_workspace/00_plan.md`에 둔다. 구현 전에 `als_reviewer`에게 계획 검토를 한 번
+   맡긴다(모호한 요구사항, 빠진 위험, 과한 범위). 계획 검토는 반복하지 않는다.
+4. 맡길 일마다 짧은 작업 계약을 쓴다. 목표, 먼저 읽을 파일과 심볼(파일 전체를 붙이지 않는다),
+   바꿔도 되는 경로, 공유 자원(포트·DB·테스트 데이터), 제약, 완료 조건, 돌려받을 내용을 적는다.
+   메시지 첫 줄에는 작업 ID를 적는다. 전체 대화를 넘기지 않는다.
+
+### 2단계: 실행
+
+- 서로 독립적인 탐색·조사는 한 턴에 `spawn_agent`로 병렬 실행한다(동시 6개가 상한, 보통 1~4개).
+- 쓰기 작업자는 1~2명으로 시작한다. 같은 파일뿐 아니라 같은 DB·포트·테스트 데이터도 겹치지 않게 나눈다.
+  인터페이스를 먼저 합의하고, 의존하는 단계는 순서대로 실행한다.
+- 하위 에이전트는 다른 에이전트를 부르지 않는다(`max_depth = 1`).
+- 메인은 이미 맡긴 탐색을 같은 시간에 다시 하지 않는다. 기다리는 동안 독립적인 판단이나 통합 준비를 한다.
+- 실패하면 원인을 먼저 본다. 같은 지시를 그대로 다시 보내지 않고, 범위를 줄이거나 방법을 바꾸거나 Sol로 올린다.
+
+### 3단계: 통합과 검증
+
+결과를 모아 최종 diff를 직접 확인하고 아래 검증 규칙대로 한 번 검증한다.
+
+### 4단계: 마무리
+
+`_workspace/`를 남기고 결과를 짧게 보고한다. 실제로 부른 역할, 확인한 것과 방법, 확인하지 못한 것을
+적는다. 실제로 실행한 검사만 통과했다고 적는다.
+
+## 검증: 한 번, 위험도에 비례
+
+검증은 비용이지 목표가 아니다. 완료 조건이 통과하면 끝낸다.
+
+- 수정하는 동안에는 가장 좁은 관련 테스트만 돌린다. 중간에 전체 테스트를 돌리지 않는다.
+- 마지막에 완료 조건을 한 번 확인한다. 통과하면 끝이다. 다시 돌리거나, 방금 쓴 파일을 다시 열거나,
+  안심하려고 `git diff`/`status`를 여러 번 확인하지 않는다.
+- 실패하면 고치고, 실패한 테스트만 다시 돌린 뒤 완료 조건을 한 번 더 확인한다.
+- 문서·문구·사소한 변경은 추가 검증이 없다. 일반 변경에는 검수자를 부르지 않는다.
+  보안·상태·동시성·데이터 손실 변경에만 최종 diff에 `als_reviewer_deep`을 한 번 맡긴다.
+  바뀌지 않은 코드를 다시 검수하지 않는다.
+- 단계마다 감시·검증 작업을 따로 만들지 않는다. 통과한 다른 워커의 결과를 다시 확인시키지 않는다.
+- 빨리 확인할 수 없는 것은 보고서에 "미확인"으로 적고 멈춘다.
+
+품질 패턴(적대적 검증, 심사위원단, 새 항목이 없을 때까지 반복)은 산출물의 정확성이 특히 중요하거나
+사용자가 "철저히", "전수"처럼 넓은 검토를 요청할 때만 쓴다. 방법은 `harness` 스킬의
+`references/workflow-recipes.md`에 있다.
+
+## 데이터 전달
+
+| 방법 | 쓰는 곳 |
+|------|------|
+| 반환 메시지 | 서브에이전트 결과 요약 |
+| 파일 | 큰 결과, 나중에 확인할 결과: `_workspace/{phase}_{agent}_{artifact}.{ext}` |
+| 구조화된 반환값 | `als-flow`의 `flow.agent(..., schema=...)` |
+| 메시지·공유 작업 목록 | `als-agent send`, `als-task` (지속형 에이전트) |
+
+결과는 결론·파일과 심볼·실행한 명령과 결과 위주로 짧게 받는다. 파일 전체나 긴 로그를 붙이지 않게 한다.
+
+## 오류 처리
+
+- 에이전트가 실패하면 한 번 다시 시도한다. 다시 실패하면 그 결과 없이 진행하고 보고서에 누락을 적는다.
+- 사용량 한도, 인증 만료, 권한 거부처럼 다시 해도 같은 실패는 다시 시도하지 않는다. 부분 산출물을 직접
+  열어 어디까지 됐는지 확인하고, 누락 내용을 `_workspace/`에 기록한 뒤 사용자에게 알린다.
+- 메인은 직접 확인한 사실만 대신 반영한다. 에이전트의 판단을 추측해 채우지 않는다.
+- 절반이 넘는 에이전트가 실패하면 계속할지 사용자에게 묻는다.
+
+## 멈추고 묻는 경우
+
+- 요구사항이 모호해서 설계가 달라질 때
+- 같은 작업이 서로 다른 방법으로 두 번 실패했을 때
+- 다음 단계가 배포, 데이터 삭제, 합의 범위를 넘는 비용, push·병합, 비밀값 전송일 때
+
+## 테스트 시나리오
+
+### 정상 흐름
+
+"API에 페이지네이션을 추가하고 테스트도 보완해줘" → 1단계에서 영향 파일과 완료 조건(관련 테스트 통과)을
+정한다. `als_explorer`가 호출 경로를 찾고, `als_worker`가 구현과 테스트를 맡는다. 메인이 diff를 보고
+완료 조건을 한 번 확인한 뒤 보고한다. 검수자는 부르지 않는다(일반 변경).
+
+### 오류 흐름
+
+인증 로직 변경에서 `als_worker`가 두 번 실패 → 같은 지시를 다시 보내지 않고 `als_hard_worker`로 올린다.
+구현이 끝나면 고위험 변경이므로 최종 diff에 `als_reviewer_deep`을 한 번 맡긴다. 그래도 완료 조건이
+실패하면 원인과 남은 문제를 보고하고 멈춘다.
+
+## 참고
+
+- 프로젝트 전용 팀 설계·개선: `$harness`, `$harness-evolve`
+- 선택 기능인 관리형 실행(작업 등록, 파일 예약, 증거 기반 완료 검사):
+  `${ALS_HOME:-~/.local/share/als}/harness-guide.md` (프로젝트 설치: `.astra-luna-sol/harness-guide.md`).
+  사용자가 관리형 실행을 요청했을 때만 읽는다.

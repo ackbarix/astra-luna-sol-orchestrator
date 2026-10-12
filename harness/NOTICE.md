@@ -53,3 +53,9 @@ Codex + GPT 모델로 바꾸는 데 필요한 부분만 고쳤다.
 - Codex는 하위 에이전트의 재위임과 워크플로 중첩을 지원하지 않으므로 계층형 위임은 단계 평탄화로 바꿨다.
 - 워크플로의 `isolation: 'worktree'`는 메인 에이전트가 미리 만든 git worktree를 `cwd=`로 넘기는 방식으로 바꿨다.
 - 워크플로 입력(`args`)은 `_workspace/00_flow_args.json` 파일로 넘긴다.
+
+## 아이디어 참고: oh-my-openagent
+
+범용 하네스(`$astra-luna-sol`)의 두 규칙, 즉 "사용자에게 보이는 동작이 바뀌면 실제 사용 확인 한 번"과
+"큰 작업은 구현 전에 계획 검토 한 번"은 code-yeongyu/oh-my-openagent의 codex-ultrawork(MIT) 지시문에서
+착안했다. 코드나 문장은 복사하지 않았다.
